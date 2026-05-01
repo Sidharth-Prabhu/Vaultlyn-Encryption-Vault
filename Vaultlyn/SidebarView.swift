@@ -21,6 +21,8 @@ struct SidebarView: View {
     @State private var showingDeleteAlert = false
     @State private var vaultToDelete: Vault?
     
+    @State private var showingAbout = false
+    
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $selectedVault) {
@@ -55,6 +57,14 @@ struct SidebarView: View {
                             } label: {
                                 Label("Delete Vault", systemImage: "trash")
                             }
+                            
+                            Divider()
+                            
+                            Button {
+                                showingAbout = true
+                            } label: {
+                                Label("About Vaultlyn", systemImage: "info.circle")
+                            }
                         }
                     }
                 }
@@ -87,6 +97,9 @@ struct SidebarView: View {
         }
         .sheet(isPresented: $showingChangePassword) {
             changePasswordSheet
+        }
+        .sheet(isPresented: $showingAbout) {
+            AboutView()
         }
         .alert("Delete Vault?", isPresented: $showingDeleteAlert, presenting: vaultToDelete) { vault in
             Button("Delete", role: .destructive) {
