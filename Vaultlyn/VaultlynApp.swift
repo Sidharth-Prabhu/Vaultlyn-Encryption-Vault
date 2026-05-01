@@ -6,12 +6,15 @@
 //
 
 import SwiftUI
+import SwiftData
 
 @main
 struct VaultlynApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .modelContainer(for: Vault.self)
         }
+        .windowStyle(.hiddenTitleBar)
     }
 }
