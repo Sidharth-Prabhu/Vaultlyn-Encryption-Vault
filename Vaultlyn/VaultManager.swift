@@ -1,6 +1,14 @@
 import Foundation
 import SwiftUI
 
+struct VaultItem: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let url: URL
+    let size: Int64
+    let modificationDate: Date
+}
+
 @Observable
 class VaultManager {
     static let shared = VaultManager()

@@ -18,6 +18,10 @@ struct SidebarView: View {
     @State private var newPassword = ""
     @State private var changePasswordError: String?
     
+    @State private var showingEditVault = false
+    @State private var vaultToEdit: Vault?
+    @State private var editedVaultName = ""
+    
     @State private var showingDeleteAlert = false
     @State private var vaultToDelete: Vault?
     
@@ -42,6 +46,14 @@ struct SidebarView: View {
                             .foregroundStyle(isUnlocked(vault) ? .primary : .secondary)
                         }
                         .contextMenu {
+                            Button {
+                                vaultToEdit = vault
+                                editedVaultName = vault.name
+                                showingEditVault = true
+                            } label: {
+                                Label("Edit Vault", systemImage: "pencil")
+                            }
+                            
                             Button {
                                 vaultToChangePassword = vault
                                 showingChangePassword = true
@@ -98,6 +110,9 @@ struct SidebarView: View {
         .sheet(isPresented: $showingChangePassword) {
             changePasswordSheet
         }
+        .sheet(isPresented: $showingEditVault) {
+            editVaultSheet
+        }
         .sheet(isPresented: $showingAbout) {
             AboutView()
         }
@@ -108,6 +123,15 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) {}
         } message: { vault in
             Text("Are you sure you want to delete '\(vault.name)'? This will remove it from the app, but files on disk will remain in \(vault.rootPath).")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowNewVaultSheet"))) { _ in
+            showingAddVault = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowChangePasswordSheet"))) { _ in
+            if let vault = vaultManager.activeVault {
+                vaultToChangePassword = vault
+                showingChangePassword = true
+            }
         }
     }
     
@@ -153,6 +177,48 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(newVaultName.isEmpty || newVaultPassword.isEmpty || selectedFolderURL == nil)
+            }
+        }
+        .padding()
+        .frame(width: 400)
+    }
+    
+    var editVaultSheet: some View {
+        VStack(spacing: 20) {
+            Text("Edit Vault")
+                .font(.headline)
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Vault Name")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Vault Name", text: $editedVaultName)
+                    .textFieldStyle(.roundedBorder)
+                
+                Text("Root Path")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(vaultToEdit?.rootPath ?? "")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.secondary.opacity(0.1))
+                    .cornerRadius(8)
+            }
+            .padding(.horizontal)
+            
+            HStack {
+                Button("Cancel") {
+                    showingEditVault = false
+                }
+                .keyboardShortcut(.escape, modifiers: [])
+                
+                Button("Save Changes") {
+                    updateVault()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(editedVaultName.isEmpty)
             }
         }
         .padding()
@@ -224,6 +290,7 @@ struct SidebarView: View {
             let bookmarkData = try folderURL.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
             let verificationData = try SecurityManager.shared.encrypt(Data("vaultlyn-verified".utf8), password: newVaultPassword, salt: salt)
             let newVault = Vault(name: newVaultName, rootPath: folderURL.path, salt: salt, verificationData: verificationData, bookmarkData: bookmarkData)
+            
             modelContext.insert(newVault)
             resetState()
         } catch {
@@ -231,11 +298,19 @@ struct SidebarView: View {
         }
     }
     
+    private func updateVault() {
+        if let vault = vaultToEdit {
+            vault.name = editedVaultName
+            try? modelContext.save()
+            showingEditVault = false
+        }
+    }
+    
     private func performChangePassword() {
         guard let vault = vaultToChangePassword else { return }
         changePasswordError = nil
         
-        Task {
+        Task { @MainActor in
             do {
                 try await VaultManager.shared.changePassword(vault: vault, oldPassword: oldPassword, newPassword: newPassword)
                 showingChangePassword = false

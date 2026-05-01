@@ -5,11 +5,11 @@ class KeychainHelper {
     static let shared = KeychainHelper()
     private init() {}
     
-    func save(_ password: String, for vaultID: String) {
+    func save(_ password: String, for account: String) {
         let data = Data(password.utf8)
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrAccount: vaultID,
+            kSecAttrAccount: account,
             kSecValueData: data
         ]
         
@@ -17,10 +17,10 @@ class KeychainHelper {
         SecItemAdd(query as CFDictionary, nil)
     }
     
-    func read(for vaultID: String) -> String? {
+    func read(for account: String) -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrAccount: vaultID,
+            kSecAttrAccount: account,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne
         ]
@@ -34,10 +34,10 @@ class KeychainHelper {
         return nil
     }
     
-    func delete(for vaultID: String) {
+    func delete(for account: String) {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrAccount: vaultID
+            kSecAttrAccount: account
         ]
         SecItemDelete(query as CFDictionary)
     }

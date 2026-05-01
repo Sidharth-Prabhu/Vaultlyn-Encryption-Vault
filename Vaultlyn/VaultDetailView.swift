@@ -9,21 +9,28 @@ struct VaultDetailView: View {
     @State private var error: String?
     @State private var selectedItem: VaultItem?
     @State private var previewURL: URL?
+    @State private var searchText = ""
     
     let columns = [
         GridItem(.adaptive(minimum: 100, maximum: 120), spacing: 20)
     ]
     
+    var filteredItems: [VaultItem] {
+        if searchText.isEmpty {
+            return vaultManager.unlockedItems
+        } else {
+            return vaultManager.unlockedItems.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        }
+    }
+    
     var body: some View {
         ZStack {
-            Group {
-                if vaultManager.activeVault?.id == vault.id && vaultManager.isUnlocked {
-                    unlockedView
-                } else if vaultManager.isProcessing {
-                    processingView
-                } else {
-                    lockedView
-                }
+            if vaultManager.activeVault?.id == vault.id && vaultManager.isUnlocked {
+                unlockedView
+            } else if vaultManager.isProcessing {
+                processingView
+            } else {
+                lockedView
             }
         }
         .navigationTitle(vault.name)
@@ -31,7 +38,9 @@ struct VaultDetailView: View {
             if vaultManager.isUnlocked {
                 ToolbarItem {
                     Button(action: { 
-                        Task { await vaultManager.lock() }
+                        Task { @MainActor in
+                            await vaultManager.lock()
+                        }
                     }) {
                         Label("Lock", systemImage: "lock.fill")
                     }
@@ -39,6 +48,90 @@ struct VaultDetailView: View {
             }
         }
         .quickLookPreview($previewURL)
+    }
+    
+    var unlockedView: some View {
+        ScrollView {
+            if vaultManager.unlockedItems.isEmpty {
+                emptyVaultView
+            } else if filteredItems.isEmpty {
+                noSearchResultsView
+            } else {
+                fileGridView
+            }
+        }
+        .background(Color(NSColor.controlBackgroundColor))
+        .searchable(text: $searchText, placement: .sidebar, prompt: "Search files...")
+        .dropDestination(for: URL.self) { urls, _ in
+            handleDrop(urls: urls)
+            return true
+        }
+        .onKeyPress(.space) {
+            if let selected = selectedItem {
+                previewURL = selected.url
+                return .handled
+            }
+            return .ignored
+        }
+    }
+    
+    private var emptyVaultView: some View {
+        ContentUnavailableView(
+            "No Files Yet",
+            systemImage: "doc.badge.plus",
+            description: Text("Drag and drop files here to add them to the vault.")
+        )
+        .frame(minHeight: 400)
+    }
+    
+    private var noSearchResultsView: some View {
+        ContentUnavailableView.search(text: searchText)
+            .frame(minHeight: 400)
+    }
+    
+    private var fileGridView: some View {
+        LazyVGrid(columns: columns, spacing: 20) {
+            ForEach(filteredItems) { item in
+                FileGridView(item: item, isSelected: selectedItem?.id == item.id)
+                    .onTapGesture {
+                        selectedItem = item
+                    }
+                    .onTapGesture(count: 2) {
+                        previewURL = item.url
+                    }
+                    .contextMenu {
+                        Button {
+                            previewURL = item.url
+                        } label: {
+                            Label("Quick Look", systemImage: "eye")
+                        }
+                        
+                        Button {
+                            NSWorkspace.shared.activateFileViewerSelecting([item.url])
+                        } label: {
+                            Label("Show in Finder", systemImage: "folder")
+                        }
+                        
+                        Divider()
+                        
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(item.url.path, forType: .string)
+                        } label: {
+                            Label("Copy Path", systemImage: "doc.on.doc")
+                        }
+                        
+                        Divider()
+                        
+                        Button(role: .destructive) {
+                            deleteItem(item)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+            }
+        }
+        .padding()
     }
     
     var lockedView: some View {
@@ -109,56 +202,12 @@ struct VaultDetailView: View {
         .shadow(radius: 20)
     }
     
-    var unlockedView: some View {
-        ScrollView {
-            if vaultManager.unlockedItems.isEmpty {
-                ContentUnavailableView(
-                    "No Files Yet",
-                    systemImage: "doc.badge.plus",
-                    description: Text("Drag and drop files here to add them to the vault.")
-                )
-                .frame(minHeight: 400)
-            } else {
-                LazyVGrid(columns: columns, spacing: 20) {
-                    ForEach(vaultManager.unlockedItems) { item in
-                        FileGridView(item: item, isSelected: selectedItem?.id == item.id)
-                            .onTapGesture {
-                                selectedItem = item
-                            }
-                            .onTapGesture(count: 2) {
-                                previewURL = item.url
-                            }
-                            .contextMenu {
-                                Button("Open with QuickLook") { previewURL = item.url }
-                                Divider()
-                                Button("Delete", role: .destructive) {
-                                    deleteItem(item)
-                                }
-                            }
-                    }
-                }
-                .padding()
-            }
-        }
-        .background(Color(NSColor.controlBackgroundColor))
-        .dropDestination(for: URL.self) { urls, _ in
-            handleDrop(urls: urls)
-            return true
-        }
-        .onKeyPress(.space) {
-            if let selected = selectedItem {
-                previewURL = selected.url
-                return .handled
-            }
-            return .ignored
-        }
-    }
-    
     private func unlock() {
         error = nil
-        Task {
+        let currentPassword = password
+        Task { @MainActor in
             do {
-                try await vaultManager.unlock(vault: vault, password: password)
+                try await vaultManager.unlock(vault: vault, password: currentPassword)
                 password = ""
             } catch {
                 self.error = "Invalid password or corrupted vault."
@@ -167,7 +216,7 @@ struct VaultDetailView: View {
     }
     
     private func handleDrop(urls: [URL]) {
-        Task {
+        Task { @MainActor in
             for url in urls {
                 try? await vaultManager.encryptFile(at: url)
             }
