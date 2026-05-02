@@ -13,6 +13,10 @@ struct SidebarView: View {
     @State private var newVaultPassword = ""
     @State private var selectedFolderURL: URL?
     
+    // Decoy state during creation
+    @State private var useDecoy = false
+    @State private var decoyPassword = ""
+    
     @State private var showingRecoveryWarning = false
     @State private var pendingVaultData: PendingVaultData?
     
@@ -41,6 +45,11 @@ struct SidebarView: View {
         let keyData: Data
         let keyHash: Data
         let encryptedMaster: Data
+        // Decoy fields
+        let hasDecoy: Bool
+        let decoyPassword: String?
+        let decoySalt: Data?
+        let decoyVerif: Data?
     }
     
     var body: some View {
@@ -72,17 +81,7 @@ struct SidebarView: View {
             
             Divider()
             
-            Button(action: { showingAddVault = true }) {
-                HStack {
-                    Image(systemName: "plus.circle.fill")
-                    Text("Create Vault")
-                    Spacer()
-                }
-                .padding()
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            createVaultButton
         }
         .toolbar {
             ToolbarItem {
@@ -91,82 +90,95 @@ struct SidebarView: View {
                 }
             }
         }
-        .sheet(isPresented: $showingAddVault) {
-            createVaultSheet
-        }
-        .sheet(isPresented: $showingRecoveryWarning) {
-            recoveryKeyWarningSheet
-        }
-        .sheet(isPresented: $showingChangePassword) {
-            changePasswordSheet
-        }
-        .sheet(isPresented: $showingEditVault) {
-            editVaultSheet
-        }
-        .sheet(isPresented: $showingAbout) {
-            AboutView()
-        }
+        .sheet(isPresented: $showingAddVault) { createVaultSheet }
+        .sheet(isPresented: $showingRecoveryWarning) { recoveryKeyWarningSheet }
+        .sheet(isPresented: $showingChangePassword) { changePasswordSheet }
+        .sheet(isPresented: $showingEditVault) { editVaultSheet }
+        .sheet(isPresented: $showingAbout) { AboutView() }
         .alert("Delete Vault?", isPresented: $showingDeleteAlert, presenting: vaultToDelete) { vault in
-            Button("Delete", role: .destructive) {
-                deleteVault(vault)
-            }
+            Button("Delete", role: .destructive) { deleteVault(vault) }
             Button("Cancel", role: .cancel) {}
         } message: { vault in
             Text("Are you sure you want to delete '\(vault.name)'? This will remove it from the app, but files on disk will remain in \(vault.rootPath).")
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowNewVaultSheet"))) { _ in
-            showingAddVault = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowChangePasswordSheet"))) { _ in
-            if let vault = selectedVault, vaultManager.sessions[vault.id]?.isUnlocked == true {
-                vaultToChangePassword = vault
-                showingChangePassword = true
+    }
+    
+    var createVaultButton: some View {
+        Button(action: { showingAddVault = true }) {
+            HStack {
+                Image(systemName: "plus.circle.fill")
+                Text("Create Vault")
+                Spacer()
             }
+            .padding()
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
     }
     
     var createVaultSheet: some View {
-        VStack(spacing: 20) {
-            Text("Create New Vault")
-                .font(.headline)
-            
-            VStack(alignment: .leading, spacing: 12) {
-                TextField("Vault Name", text: $newVaultName)
-                    .textFieldStyle(.roundedBorder)
+        ScrollView {
+            VStack(spacing: 20) {
+                Text("Create New Vault")
+                    .font(.headline)
                 
-                SecureField("Master Password", text: $newVaultPassword)
-                    .textFieldStyle(.roundedBorder)
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Basic Info")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Vault Name", text: $newVaultName)
+                            .textFieldStyle(.roundedBorder)
+                        
+                        SecureField("Master Password", text: $newVaultPassword)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    Divider()
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Enable Decoy Mode", isOn: $useDecoy)
+                            .font(.subheadline)
+                        
+                        if useDecoy {
+                            SecureField("Decoy Password", text: $decoyPassword)
+                                .textFieldStyle(.roundedBorder)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                            
+                            Text("When the decoy password is used, the vault will open into a hidden '.decoy' folder instead of your real documents.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    HStack {
+                        Text(selectedFolderURL?.lastPathComponent ?? "No folder selected")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Select Folder...") { selectFolder() }
+                    }
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.1))
+                    .cornerRadius(8)
+                }
+                .padding(.horizontal)
                 
                 HStack {
-                    Text(selectedFolderURL?.lastPathComponent ?? "No folder selected")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Select Folder...") {
-                        selectFolder()
-                    }
+                    Button("Cancel") { resetState() }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    
+                    Button("Prepare Vault") { prepareVault() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newVaultName.isEmpty || newVaultPassword.isEmpty || selectedFolderURL == nil || (useDecoy && decoyPassword.isEmpty))
                 }
-                .padding(8)
-                .background(Color.secondary.opacity(0.1))
-                .cornerRadius(8)
             }
-            .padding(.horizontal)
-            
-            HStack {
-                Button("Cancel") {
-                    resetState()
-                }
-                .keyboardShortcut(.escape, modifiers: [])
-                
-                Button("Prepare Vault") {
-                    prepareVault()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(newVaultName.isEmpty || newVaultPassword.isEmpty || selectedFolderURL == nil)
-            }
+            .padding()
         }
-        .padding()
-        .frame(width: 400)
+        .frame(width: 450, height: 500)
     }
     
     var recoveryKeyWarningSheet: some View {
@@ -213,6 +225,92 @@ struct SidebarView: View {
         .frame(width: 450)
     }
     
+    var changePasswordSheet: some View {
+        VStack(spacing: 20) {
+            Text("Change Password")
+                .font(.headline)
+            
+            VStack(alignment: .leading, spacing: 12) {
+                SecureField("Old Password", text: $oldPassword)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("New Password", text: $newPassword)
+                    .textFieldStyle(.roundedBorder)
+                
+                if let error = changePasswordError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            .padding(.horizontal)
+            
+            HStack {
+                Button("Cancel") {
+                    showingChangePassword = false
+                    oldPassword = ""
+                    newPassword = ""
+                }
+                
+                Button("Update Password") {
+                    performPasswordChange()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(oldPassword.isEmpty || newPassword.isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 400)
+    }
+    
+    var editVaultSheet: some View {
+        VStack(spacing: 20) {
+            Text("Edit Vault")
+                .font(.headline)
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Vault Name")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Name", text: $editedVaultName)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .padding(.horizontal)
+            
+            HStack {
+                Button("Cancel") {
+                    showingEditVault = false
+                }
+                
+                Button("Save") {
+                    if let vault = vaultToEdit {
+                        vault.name = editedVaultName
+                        showingEditVault = false
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(editedVaultName.isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 400)
+    }
+    
+    private func performPasswordChange() {
+        guard let vault = vaultToChangePassword else { return }
+        changePasswordError = nil
+        
+        Task { @MainActor in
+            do {
+                try await vaultManager.changePassword(vault: vault, oldPassword: oldPassword, newPassword: newPassword)
+                showingChangePassword = false
+                oldPassword = ""
+                newPassword = ""
+            } catch {
+                changePasswordError = "Password change failed. Please check your old password."
+            }
+        }
+    }
+    
     private func prepareVault() {
         guard let folderURL = selectedFolderURL else { return }
         do {
@@ -223,6 +321,13 @@ struct SidebarView: View {
             let recovery = SecurityManager.shared.generateRecoveryKey()
             let encryptedMaster = try SecurityManager.shared.encryptWithRecoveryKey(Data(newVaultPassword.utf8), recoveryKey: recovery.keyData)
             
+            var dSalt: Data?
+            var dVerif: Data?
+            if useDecoy {
+                dSalt = SecurityManager.shared.generateSalt()
+                dVerif = try SecurityManager.shared.encrypt(Data("vaultlyn-decoy".utf8), password: decoyPassword, salt: dSalt!)
+            }
+            
             pendingVaultData = PendingVaultData(
                 name: newVaultName,
                 path: folderURL,
@@ -232,7 +337,11 @@ struct SidebarView: View {
                 bookmark: bookmarkData,
                 keyData: recovery.keyData,
                 keyHash: recovery.hash,
-                encryptedMaster: encryptedMaster
+                encryptedMaster: encryptedMaster,
+                hasDecoy: useDecoy,
+                decoyPassword: useDecoy ? decoyPassword : nil,
+                decoySalt: dSalt,
+                decoyVerif: dVerif
             )
             
             showingAddVault = false
@@ -261,7 +370,10 @@ struct SidebarView: View {
                     verificationData: data.verification,
                     bookmarkData: data.bookmark,
                     recoveryKeyHash: data.keyHash,
-                    encryptedMasterPassword: data.encryptedMaster
+                    encryptedMasterPassword: data.encryptedMaster,
+                    hasDecoy: data.hasDecoy,
+                    decoySalt: data.decoySalt,
+                    decoyVerificationData: data.decoyVerif
                 )
                 
                 modelContext.insert(newVault)
@@ -271,95 +383,9 @@ struct SidebarView: View {
                 showingRecoveryWarning = false
                 pendingVaultData = nil
             } catch {
-                print("Error saving recovery key: \(error)")
+                print("Error saving vault: \(error)")
             }
         }
-    }
-    
-    var editVaultSheet: some View {
-        VStack(spacing: 20) {
-            Text("Edit Vault")
-                .font(.headline)
-            
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Vault Name")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("Vault Name", text: $editedVaultName)
-                    .textFieldStyle(.roundedBorder)
-                
-                Text("Root Path")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(vaultToEdit?.rootPath ?? "")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.secondary.opacity(0.1))
-                    .cornerRadius(8)
-            }
-            .padding(.horizontal)
-            
-            HStack {
-                Button("Cancel") {
-                    showingEditVault = false
-                }
-                .keyboardShortcut(.escape, modifiers: [])
-                
-                Button("Save Changes") {
-                    updateVault()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(editedVaultName.isEmpty)
-            }
-        }
-        .padding()
-        .frame(width: 400)
-    }
-    
-    var changePasswordSheet: some View {
-        VStack(spacing: 20) {
-            Text("Change Password")
-                .font(.headline)
-            
-            VStack(alignment: .leading, spacing: 12) {
-                SecureField("Current Password", text: $oldPassword)
-                    .textFieldStyle(.roundedBorder)
-                
-                SecureField("New Password", text: $newPassword)
-                    .textFieldStyle(.roundedBorder)
-                
-                if let error = changePasswordError {
-                    Text(error)
-                        .foregroundStyle(.red)
-                        .font(.caption)
-                }
-                
-                Text("This will re-encrypt all files in the vault. Do not close the app during this process.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal)
-            
-            HStack {
-                Button("Cancel") {
-                    showingChangePassword = false
-                    oldPassword = ""
-                    newPassword = ""
-                    changePasswordError = nil
-                }
-                .keyboardShortcut(.escape, modifiers: [])
-                
-                Button("Change Password") {
-                    performChangePassword()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(oldPassword.isEmpty || newPassword.isEmpty)
-            }
-        }
-        .padding()
-        .frame(width: 400)
     }
     
     private func selectFolder() {
@@ -376,35 +402,13 @@ struct SidebarView: View {
         }
     }
     
-    private func updateVault() {
-        if let vault = vaultToEdit {
-            vault.name = editedVaultName
-            try? modelContext.save()
-            showingEditVault = false
-        }
-    }
-    
-    private func performChangePassword() {
-        guard let vault = vaultToChangePassword else { return }
-        changePasswordError = nil
-        
-        Task { @MainActor in
-            do {
-                try await VaultManager.shared.changePassword(vault: vault, oldPassword: oldPassword, newPassword: newPassword)
-                showingChangePassword = false
-                oldPassword = ""
-                newPassword = ""
-            } catch {
-                changePasswordError = "Invalid current password or processing error."
-            }
-        }
-    }
-    
     private func resetState() {
         showingAddVault = false
         showingRecoveryWarning = false
         newVaultName = ""
         newVaultPassword = ""
+        decoyPassword = ""
+        useDecoy = false
         selectedFolderURL = nil
         pendingVaultData = nil
     }

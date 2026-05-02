@@ -42,6 +42,7 @@ struct AboutView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
+                .padding(.horizontal, 32)
                 
                 VStack(spacing: 4) {
                     Text("Developed by Sidharth P L")

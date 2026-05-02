@@ -22,6 +22,9 @@ class VaultSession {
     var sessionKey: String?
     var scopedURL: URL?
     
+    // Decoy Mode state
+    var isDecoyMode: Bool = false
+    
     init(vault: Vault) {
         self.vault = vault
     }
@@ -60,6 +63,7 @@ class VaultManager {
             s.isProcessing = true
             s.progress = 0.0
             s.logs = ["Initializing unlock sequence..."]
+            s.isDecoyMode = false // Reset decoy mode
         }
         
         defer { 
@@ -85,25 +89,52 @@ class VaultManager {
             }
         }
         
-        // Verify password
-        await MainActor.run { s.addLog("Verifying master password...") }
+        // Authentication check (Primary vs Decoy)
+        await MainActor.run { s.addLog("Authenticating...") }
+        
+        var authenticatedAsDecoy = false
+        var authSuccess = false
+        
+        // Try Primary
         if let verificationData = vault.verificationData {
-            let decryptedData = try SecurityManager.shared.decrypt(verificationData, password: password, salt: vault.salt)
-            let verificationString = String(data: decryptedData, encoding: .utf8)
-            guard verificationString == "vaultlyn-verified" else {
-                await MainActor.run { s.addLog("ERROR: Invalid password.") }
-                throw SecurityError.decryptionFailed
+            do {
+                let decryptedData = try SecurityManager.shared.decrypt(verificationData, password: password, salt: vault.salt)
+                if String(data: decryptedData, encoding: .utf8) == "vaultlyn-verified" {
+                    authSuccess = true
+                    await MainActor.run { s.addLog("Authenticated as Master.") }
+                }
+            } catch {
+                // Not master, try decoy if enabled
+                if vault.hasDecoy, let dSalt = vault.decoySalt, let dVerif = vault.decoyVerificationData {
+                    do {
+                        let decoyData = try SecurityManager.shared.decrypt(dVerif, password: password, salt: dSalt)
+                        if String(data: decoyData, encoding: .utf8) == "vaultlyn-decoy" {
+                            authSuccess = true
+                            authenticatedAsDecoy = true
+                            await MainActor.run { s.addLog("Authenticated with access key.") }
+                        }
+                    } catch {
+                        // Both failed
+                    }
+                }
             }
         }
         
-        s.sessionKey = password
+        guard authSuccess else {
+            await MainActor.run { s.addLog("ERROR: Invalid credentials.") }
+            throw SecurityError.decryptionFailed
+        }
         
-        if persist {
+        s.sessionKey = password
+        s.isDecoyMode = authenticatedAsDecoy
+        
+        if persist && !authenticatedAsDecoy { // Only persist real passwords
             KeychainHelper.shared.save(password, for: vault.id.uuidString)
             saveUnlockedVaultID(vault.id.uuidString)
         }
         
         // Automatically decrypt all files recursively
+        // IN DECOY MODE: Only decrypt the .decoy folder to prevent errors with real files
         await MainActor.run { s.addLog("Starting recursive decryption...") }
         try await decryptAllFiles(session: s)
         
@@ -146,6 +177,7 @@ class VaultManager {
             s.unlockedItems = []
             s.progress = 1.0
             s.isProcessing = false
+            s.isDecoyMode = false
         }
     }
     
@@ -218,7 +250,16 @@ class VaultManager {
     }
     
     func refreshItems(session: VaultSession, at folderURL: URL? = nil) throws {
-        let url = folderURL ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
+        var url = folderURL ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
+        
+        // Decoy Mode handling: Force navigation into a .decoy subfolder
+        if session.isDecoyMode && folderURL == nil {
+            let decoyURL = url.appendingPathComponent(".decoy")
+            if !FileManager.default.fileExists(atPath: decoyURL.path) {
+                try FileManager.default.createDirectory(at: decoyURL, withIntermediateDirectories: true)
+            }
+            url = decoyURL
+        }
         
         let fileURLs = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
         
@@ -253,7 +294,17 @@ class VaultManager {
         while let fileURL = enumerator?.nextObject() as? URL {
             let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
             if resourceValues.isDirectory == false && fileURL.pathExtension != "vaultlyn" {
-                filesToProcess.append(fileURL)
+                // If in Decoy Mode, ONLY encrypt files within the .decoy folder
+                if session.isDecoyMode {
+                    if fileURL.path.contains("/.decoy/") {
+                        filesToProcess.append(fileURL)
+                    }
+                } else {
+                    // In Master Mode, skip .decoy folder to prevent using master password on decoy files
+                    if !fileURL.path.contains("/.decoy/") {
+                        filesToProcess.append(fileURL)
+                    }
+                }
             }
         }
         
@@ -265,7 +316,11 @@ class VaultManager {
         for fileURL in filesToProcess {
             await MainActor.run { session.addLog("Encrypting: \(fileURL.lastPathComponent)") }
             let data = try Data(contentsOf: fileURL)
-            let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: session.vault.salt)
+            // Use different salt for decoy files if needed, but for simplicity we'll use primary salt
+            // Crucially, the PASSWORD is different, so the derived key is different.
+            let saltToUse = session.isDecoyMode ? (session.vault.decoySalt ?? session.vault.salt) : session.vault.salt
+            
+            let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: saltToUse)
             
             let destinationURL = fileURL.appendingPathExtension("vaultlyn")
             try encryptedData.write(to: destinationURL)
@@ -286,7 +341,16 @@ class VaultManager {
         while let fileURL = enumerator?.nextObject() as? URL {
             let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
             if resourceValues.isDirectory == false && fileURL.pathExtension == "vaultlyn" {
-                filesToProcess.append(fileURL)
+                // CRITICAL FIX: Only decrypt files belonging to the current mode
+                if session.isDecoyMode {
+                    if fileURL.path.contains("/.decoy/") {
+                        filesToProcess.append(fileURL)
+                    }
+                } else {
+                    if !fileURL.path.contains("/.decoy/") {
+                        filesToProcess.append(fileURL)
+                    }
+                }
             }
         }
         
@@ -297,12 +361,19 @@ class VaultManager {
         
         for fileURL in filesToProcess {
             await MainActor.run { session.addLog("Decrypting: \(fileURL.lastPathComponent)") }
-            let encryptedData = try Data(contentsOf: fileURL)
-            let decryptedData = try SecurityManager.shared.decrypt(encryptedData, password: password, salt: session.vault.salt)
+            let saltToUse = session.isDecoyMode ? (session.vault.decoySalt ?? session.vault.salt) : session.vault.salt
             
-            let destinationURL = fileURL.deletingPathExtension()
-            try decryptedData.write(to: destinationURL)
-            try FileManager.default.removeItem(at: fileURL)
+            do {
+                let encryptedData = try Data(contentsOf: fileURL)
+                let decryptedData = try SecurityManager.shared.decrypt(encryptedData, password: password, salt: saltToUse)
+                
+                let destinationURL = fileURL.deletingPathExtension()
+                try decryptedData.write(to: destinationURL)
+                try FileManager.default.removeItem(at: fileURL)
+            } catch {
+                // Log but don't fail the whole operation if one file fails (might be a cross-mode file)
+                await MainActor.run { session.addLog("SKIPPED: \(fileURL.lastPathComponent) (Decryption failed)") }
+            }
             
             completed += 1.0
             await MainActor.run { session.progress = completed / totalFiles }
@@ -311,7 +382,16 @@ class VaultManager {
     
     func encryptFiles(urls: [URL], session: VaultSession, targetFolder: URL? = nil) async throws {
         guard let password = session.sessionKey else { return }
-        let folderURL = targetFolder ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
+        var folderURL = targetFolder ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
+        
+        // Decoy Mode drop handling
+        if session.isDecoyMode && targetFolder == nil {
+            let decoyURL = folderURL.appendingPathComponent(".decoy")
+            if !FileManager.default.fileExists(atPath: decoyURL.path) {
+                try FileManager.default.createDirectory(at: decoyURL, withIntermediateDirectories: true)
+            }
+            folderURL = decoyURL
+        }
         
         await MainActor.run {
             session.isProcessing = true
@@ -326,11 +406,13 @@ class VaultManager {
         let total = Double(urls.count)
         var completed = 0.0
         
+        let saltToUse = session.isDecoyMode ? (session.vault.decoySalt ?? session.vault.salt) : session.vault.salt
+        
         for sourceURL in urls {
             await MainActor.run { session.addLog("Securing: \(sourceURL.lastPathComponent)") }
             
             let data = try Data(contentsOf: sourceURL)
-            let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: session.vault.salt)
+            let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: saltToUse)
             
             let destinationURL = folderURL.appendingPathComponent(sourceURL.lastPathComponent).appendingPathExtension("vaultlyn")
             try encryptedData.write(to: destinationURL)
