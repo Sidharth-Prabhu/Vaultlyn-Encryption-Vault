@@ -309,10 +309,36 @@ class VaultManager {
         }
     }
     
-    func encryptFile(at sourceURL: URL, session: VaultSession, targetFolder: URL? = nil) async throws {
-        let url = targetFolder ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
-        let destinationURL = url.appendingPathComponent(sourceURL.lastPathComponent)
-        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-        try refreshItems(session: session, at: url)
+    func encryptFiles(urls: [URL], session: VaultSession, targetFolder: URL? = nil) async throws {
+        guard let password = session.sessionKey else { return }
+        let folderURL = targetFolder ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
+        
+        await MainActor.run {
+            session.isProcessing = true
+            session.progress = 0.0
+            session.logs = ["Importing \(urls.count) files..."]
+        }
+        
+        defer {
+            Task { @MainActor in session.isProcessing = false }
+        }
+        
+        let total = Double(urls.count)
+        var completed = 0.0
+        
+        for sourceURL in urls {
+            await MainActor.run { session.addLog("Securing: \(sourceURL.lastPathComponent)") }
+            
+            let data = try Data(contentsOf: sourceURL)
+            let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: session.vault.salt)
+            
+            let destinationURL = folderURL.appendingPathComponent(sourceURL.lastPathComponent).appendingPathExtension("vaultlyn")
+            try encryptedData.write(to: destinationURL)
+            
+            completed += 1.0
+            await MainActor.run { session.progress = completed / total }
+        }
+        
+        try refreshItems(session: session, at: folderURL)
     }
 }

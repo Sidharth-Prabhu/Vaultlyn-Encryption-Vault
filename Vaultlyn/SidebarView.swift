@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 struct SidebarView: View {
     @Environment(\.modelContext) private var modelContext
@@ -11,6 +12,9 @@ struct SidebarView: View {
     @State private var newVaultName = ""
     @State private var newVaultPassword = ""
     @State private var selectedFolderURL: URL?
+    
+    @State private var showingRecoveryWarning = false
+    @State private var pendingVaultData: PendingVaultData?
     
     @State private var showingChangePassword = false
     @State private var vaultToChangePassword: Vault?
@@ -27,57 +31,37 @@ struct SidebarView: View {
     
     @State private var showingAbout = false
     
+    struct PendingVaultData {
+        let name: String
+        let path: URL
+        let password: String
+        let salt: Data
+        let verification: Data
+        let bookmark: Data
+        let keyData: Data
+        let keyHash: Data
+        let encryptedMaster: Data
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $selectedVault) {
                 Section("Your Vaults") {
                     ForEach(vaults) { vault in
-                        NavigationLink(value: vault) {
-                            HStack {
-                                Label(vault.name, systemImage: isUnlocked(vault) ? "lock.open.fill" : "lock.fill")
-                                Spacer()
-                                if isUnlocked(vault) {
-                                    Circle()
-                                        .fill(.green)
-                                        .frame(width: 8, height: 8)
-                                        .shadow(color: .green.opacity(0.5), radius: 2)
-                                }
-                            }
-                            .foregroundStyle(isUnlocked(vault) ? .primary : .secondary)
-                        }
-                        .contextMenu {
-                            Button {
-                                vaultToEdit = vault
-                                editedVaultName = vault.name
-                                showingEditVault = true
-                            } label: {
-                                Label("Edit Vault", systemImage: "pencil")
-                            }
-                            
-                            Button {
-                                vaultToChangePassword = vault
-                                showingChangePassword = true
-                            } label: {
-                                Label("Change Password", systemImage: "key.fill")
-                            }
-                            
-                            Divider()
-                            
-                            Button(role: .destructive) {
-                                vaultToDelete = vault
-                                showingDeleteAlert = true
-                            } label: {
-                                Label("Delete Vault", systemImage: "trash")
-                            }
-                            
-                            Divider()
-                            
-                            Button {
-                                showingAbout = true
-                            } label: {
-                                Label("About Vaultlyn", systemImage: "info.circle")
-                            }
-                        }
+                        VaultRow(vault: vault, vaultManager: vaultManager, onEdit: {
+                            vaultToEdit = vault
+                            editedVaultName = vault.name
+                            showingEditVault = true
+                        }, onChangePassword: {
+                            vaultToChangePassword = vault
+                            showingChangePassword = true
+                        }, onDelete: {
+                            vaultToDelete = vault
+                            showingDeleteAlert = true
+                        }, onAbout: {
+                            showingAbout = true
+                        })
+                        .tag(vault)
                     }
                 }
             }
@@ -110,6 +94,9 @@ struct SidebarView: View {
         .sheet(isPresented: $showingAddVault) {
             createVaultSheet
         }
+        .sheet(isPresented: $showingRecoveryWarning) {
+            recoveryKeyWarningSheet
+        }
         .sheet(isPresented: $showingChangePassword) {
             changePasswordSheet
         }
@@ -131,15 +118,11 @@ struct SidebarView: View {
             showingAddVault = true
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowChangePasswordSheet"))) { _ in
-            if let vault = selectedVault, isUnlocked(vault) {
+            if let vault = selectedVault, vaultManager.sessions[vault.id]?.isUnlocked == true {
                 vaultToChangePassword = vault
                 showingChangePassword = true
             }
         }
-    }
-    
-    private func isUnlocked(_ vault: Vault) -> Bool {
-        vaultManager.sessions[vault.id]?.isUnlocked == true
     }
     
     var createVaultSheet: some View {
@@ -175,8 +158,8 @@ struct SidebarView: View {
                 }
                 .keyboardShortcut(.escape, modifiers: [])
                 
-                Button("Create") {
-                    addVault()
+                Button("Prepare Vault") {
+                    prepareVault()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(newVaultName.isEmpty || newVaultPassword.isEmpty || selectedFolderURL == nil)
@@ -184,6 +167,113 @@ struct SidebarView: View {
         }
         .padding()
         .frame(width: 400)
+    }
+    
+    var recoveryKeyWarningSheet: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "key.viewfinder")
+                .font(.system(size: 48))
+                .foregroundStyle(.orange)
+            
+            VStack(spacing: 8) {
+                Text("Recovery Key Generated")
+                    .font(.headline)
+                Text("A unique recovery key has been created for your vault. If you forget your password or the vault gets locked due to multiple failed attempts, this key is the ONLY way to regain access.")
+                    .font(.subheadline)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            }
+            
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text("Store this file in a safe, offline location.")
+                }
+                HStack {
+                    Image(systemName: "lock.shield.fill")
+                    Text("Anyone with this file can access your vault.")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.orange)
+            
+            HStack {
+                Button("Cancel") {
+                    showingRecoveryWarning = false
+                    pendingVaultData = nil
+                }
+                
+                Button("Save Recovery Key & Finish") {
+                    saveRecoveryKey()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(32)
+        .frame(width: 450)
+    }
+    
+    private func prepareVault() {
+        guard let folderURL = selectedFolderURL else { return }
+        do {
+            let salt = SecurityManager.shared.generateSalt()
+            let bookmarkData = try folderURL.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+            let verificationData = try SecurityManager.shared.encrypt(Data("vaultlyn-verified".utf8), password: newVaultPassword, salt: salt)
+            
+            let recovery = SecurityManager.shared.generateRecoveryKey()
+            let encryptedMaster = try SecurityManager.shared.encryptWithRecoveryKey(Data(newVaultPassword.utf8), recoveryKey: recovery.keyData)
+            
+            pendingVaultData = PendingVaultData(
+                name: newVaultName,
+                path: folderURL,
+                password: newVaultPassword,
+                salt: salt,
+                verification: verificationData,
+                bookmark: bookmarkData,
+                keyData: recovery.keyData,
+                keyHash: recovery.hash,
+                encryptedMaster: encryptedMaster
+            )
+            
+            showingAddVault = false
+            showingRecoveryWarning = true
+        } catch {
+            print("Error preparing vault: \(error)")
+        }
+    }
+    
+    private func saveRecoveryKey() {
+        guard let data = pendingVaultData else { return }
+        
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [UTType(filenameExtension: "vaultkey")!]
+        savePanel.nameFieldStringValue = "\(data.name).vaultkey"
+        savePanel.message = "Choose a safe place to store your recovery key."
+        
+        if savePanel.runModal() == .OK, let url = savePanel.url {
+            do {
+                try data.keyData.write(to: url)
+                
+                let newVault = Vault(
+                    name: data.name,
+                    rootPath: data.path.path,
+                    salt: data.salt,
+                    verificationData: data.verification,
+                    bookmarkData: data.bookmark,
+                    recoveryKeyHash: data.keyHash,
+                    encryptedMasterPassword: data.encryptedMaster
+                )
+                
+                modelContext.insert(newVault)
+                try modelContext.save()
+                
+                resetState()
+                showingRecoveryWarning = false
+                pendingVaultData = nil
+            } catch {
+                print("Error saving recovery key: \(error)")
+            }
+        }
     }
     
     var editVaultSheet: some View {
@@ -286,21 +376,6 @@ struct SidebarView: View {
         }
     }
     
-    private func addVault() {
-        guard let folderURL = selectedFolderURL else { return }
-        do {
-            let salt = SecurityManager.shared.generateSalt()
-            let bookmarkData = try folderURL.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
-            let verificationData = try SecurityManager.shared.encrypt(Data("vaultlyn-verified".utf8), password: newVaultPassword, salt: salt)
-            let newVault = Vault(name: newVaultName, rootPath: folderURL.path, salt: salt, verificationData: verificationData, bookmarkData: bookmarkData)
-            
-            modelContext.insert(newVault)
-            resetState()
-        } catch {
-            print("Error creating vault: \(error)")
-        }
-    }
-    
     private func updateVault() {
         if let vault = vaultToEdit {
             vault.name = editedVaultName
@@ -327,15 +402,72 @@ struct SidebarView: View {
     
     private func resetState() {
         showingAddVault = false
+        showingRecoveryWarning = false
         newVaultName = ""
         newVaultPassword = ""
         selectedFolderURL = nil
+        pendingVaultData = nil
     }
     
     private func deleteVault(_ vault: Vault) {
         modelContext.delete(vault)
         if selectedVault?.id == vault.id {
             selectedVault = nil
+        }
+    }
+}
+
+struct VaultRow: View {
+    let vault: Vault
+    let vaultManager: VaultManager
+    let onEdit: () -> Void
+    let onChangePassword: () -> Void
+    let onDelete: () -> Void
+    let onAbout: () -> Void
+    
+    private var isUnlocked: Bool {
+        vaultManager.sessions[vault.id]?.isUnlocked == true
+    }
+    
+    var body: some View {
+        NavigationLink(value: vault) {
+            HStack {
+                Label(vault.name, systemImage: isUnlocked ? "lock.open.fill" : "lock.fill")
+                Spacer()
+                if isUnlocked {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 8, height: 8)
+                        .shadow(color: .green.opacity(0.5), radius: 2)
+                }
+                if vault.isLockedOut {
+                    Image(systemName: "exclamationmark.shield.fill")
+                        .foregroundStyle(Color.red)
+                        .font(.caption)
+                }
+            }
+            .foregroundStyle(isUnlocked ? Color.primary : (vault.isLockedOut ? Color.red : Color.secondary))
+        }
+        .contextMenu {
+            Button(action: onEdit) {
+                Label("Edit Vault", systemImage: "pencil")
+            }
+            
+            Button(action: onChangePassword) {
+                Label("Change Password", systemImage: "key.fill")
+            }
+            
+            Divider()
+            
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete Vault", systemImage: "trash")
+            }
+            
+            Divider()
+            
+            Button(action: onAbout) {
+                Label("About Vaultlyn", systemImage: "info.circle")
+            }
         }
     }
 }

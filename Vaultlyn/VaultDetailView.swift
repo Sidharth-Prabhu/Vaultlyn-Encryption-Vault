@@ -6,13 +6,18 @@ struct VaultDetailView: View {
     let vault: Vault
     @State private var vaultManager = VaultManager.shared
     @State private var password = ""
-    @State private var error: String?
+    @State private var errorMessage: String?
     @State private var selection: Set<UUID> = []
     @State private var previewURL: URL?
     @State private var searchText = ""
     
     // Navigation state
     @State private var navigationStack: [URL] = []
+    
+    // Recovery state
+    @State private var recoveredWithKey = false
+    @State private var showingResetPassword = false
+    @State private var newPassword = ""
     
     // Marquee selection state
     @State private var dragStart: CGPoint?
@@ -42,12 +47,15 @@ struct VaultDetailView: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
-                if session.isUnlocked {
+                if session.isProcessing {
+                    processingView
+                } else if session.isUnlocked {
+                    if recoveredWithKey {
+                        recoveryAlertBar
+                    }
                     breadcrumbBar
                     Divider()
                     unlockedView
-                } else if session.isProcessing {
-                    processingView
                 } else {
                     lockedView
                 }
@@ -87,6 +95,7 @@ struct VaultDetailView: View {
                     Button(action: { 
                         Task { @MainActor in
                             await vaultManager.lock(vault: vault)
+                            recoveredWithKey = false
                         }
                     }) {
                         Label("Lock", systemImage: "lock.fill")
@@ -95,12 +104,35 @@ struct VaultDetailView: View {
             }
         }
         .quickLookPreview($previewURL)
+        .sheet(isPresented: $showingResetPassword) {
+            resetPasswordSheet
+        }
         .onChange(of: vault) { _, _ in
             navigationStack = []
+            recoveredWithKey = false
             if session.isUnlocked {
                 try? vaultManager.refreshItems(session: session, at: currentFolderURL)
             }
         }
+    }
+    
+    var recoveryAlertBar: some View {
+        HStack {
+            Image(systemName: "key.fill")
+                .foregroundStyle(.orange)
+            Text("Vault unlocked with recovery key.")
+                .font(.subheadline)
+            Spacer()
+            Button("Change Password") {
+                showingResetPassword = true
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.orange)
+            .controlSize(.small)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.15))
     }
     
     var breadcrumbBar: some View {
@@ -285,6 +317,17 @@ struct VaultDetailView: View {
     }
     
     var lockedView: some View {
+        VStack(spacing: 24) {
+            if vault.isLockedOut {
+                lockoutView
+            } else {
+                standardLockedView
+            }
+        }
+        .padding()
+    }
+    
+    var standardLockedView: some View {
         VStack(spacing: 20) {
             Image(systemName: "lock.shield")
                 .font(.system(size: 64))
@@ -293,24 +336,108 @@ struct VaultDetailView: View {
             Text("Unlock \(vault.name)")
                 .font(.title2)
             
-            SecureField("Password", text: $password)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 250)
-                .onSubmit { unlock() }
+            VStack(spacing: 8) {
+                SecureField("Password", text: $password)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 250)
+                    .onSubmit { unlock() }
+                
+                if vault.failedAttempts > 0 {
+                    Text("\(5 - vault.failedAttempts) attempts remaining")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
             
-            if let error = error {
-                Text(error)
-                    .foregroundStyle(.red)
+            if let error = errorMessage {
+                errorBanner(message: error)
+            }
+            
+            HStack(spacing: 12) {
+                Button("Unlock Vault") {
+                    unlock()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(password.isEmpty || session.isProcessing)
+                
+                Button("Use Recovery Key") {
+                    recoverVault()
+                }
+                .buttonStyle(.bordered)
+            }
+            
+            recoveryStatusIndicator
+        }
+    }
+    
+    var lockoutView: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.system(size: 64))
+                .foregroundStyle(.red)
+            
+            VStack(spacing: 8) {
+                Text("Security Lockout")
+                    .font(.title2)
+                Text("Too many failed password attempts. Access is disabled for your protection.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            
+            VStack(spacing: 12) {
+                Text("To regain access, please select your recovery key (.vaultkey) generated during vault creation.")
                     .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(width: 300)
+                
+                Button("Select Recovery Key...") {
+                    recoverVault()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
             }
             
-            Button("Unlock Vault") {
-                unlock()
+            if let error = errorMessage {
+                errorBanner(message: error)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(password.isEmpty || session.isProcessing)
+            
+            recoveryStatusIndicator
         }
         .padding()
+        .frame(maxWidth: 400)
+    }
+    
+    var resetPasswordSheet: some View {
+        VStack(spacing: 20) {
+            Text("Reset Vault Password")
+                .font(.headline)
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Text("You've unlocked this vault with a recovery key. It is highly recommended to set a new master password now.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                
+                SecureField("New Password", text: $newPassword)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .padding(.horizontal)
+            
+            HStack {
+                Button("Later") {
+                    showingResetPassword = false
+                }
+                
+                Button("Reset & Re-encrypt") {
+                    performReset()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newPassword.isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 400)
     }
     
     var processingView: some View {
@@ -363,22 +490,104 @@ struct VaultDetailView: View {
     }
     
     private func unlock() {
-        error = nil
+        errorMessage = nil
         let currentPassword = password
         Task { @MainActor in
             do {
                 try await vaultManager.unlock(vault: vault, password: currentPassword)
                 password = ""
+                vault.failedAttempts = 0
+                vault.isLockedOut = false
             } catch {
-                self.error = "Invalid password or corrupted vault."
+                vault.failedAttempts += 1
+                if vault.failedAttempts >= 5 {
+                    vault.isLockedOut = true
+                    errorMessage = "Vault locked due to too many attempts."
+                } else {
+                    errorMessage = "Invalid password. \(5 - vault.failedAttempts) attempts remaining."
+                }
+            }
+        }
+    }
+    
+    private func recoverVault() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "vaultkey") ?? .data]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.message = "Select the recovery key for '\(vault.name)'"
+        
+        panel.begin { result in
+            if result == .OK, let url = panel.url {
+                print("DEBUG: Recovery key selected: \(url.path)")
+                do {
+                    let keyData = try Data(contentsOf: url)
+                    guard let encryptedMaster = vault.encryptedMasterPassword else {
+                        print("DEBUG: Missing encryptedMasterPassword")
+                        errorMessage = "This vault was created without recovery data. Recovery is not possible."
+                        return
+                    }
+                    
+                    // Decrypt the master password using the recovery key
+                    let masterPasswordData = try SecurityManager.shared.decryptWithRecoveryKey(encryptedMaster, recoveryKey: keyData)
+                    let recoveredPassword = String(data: masterPasswordData, encoding: .utf8) ?? ""
+                    
+                    if recoveredPassword.isEmpty {
+                        print("DEBUG: Recovered password is empty")
+                        errorMessage = "Corrupted recovery data."
+                        return
+                    }
+                    
+                    Task { @MainActor in
+                        do {
+                            print("DEBUG: Starting direct unlock with recovered password...")
+                            // Directly unlock using the recovered password
+                            try await vaultManager.unlock(vault: vault, password: recoveredPassword)
+                            
+                            // Reset lockout state
+                            vault.failedAttempts = 0
+                            vault.isLockedOut = false
+                            recoveredWithKey = true
+                            
+                            // Ask to reset password
+                            showingResetPassword = true
+                            errorMessage = nil 
+                            print("DEBUG: Recovery unlock successful!")
+                        } catch {
+                            print("DEBUG: Unlock failed: \(error.localizedDescription)")
+                            errorMessage = "Recovery unlock failed: \(error.localizedDescription)"
+                        }
+                    }
+                } catch {
+                    print("DEBUG: Decryption or File Read failed: \(error.localizedDescription)")
+                    errorMessage = "Invalid recovery key or decryption failed. Please ensure you selected the correct .vaultkey file."
+                }
+            }
+        }
+    }
+    
+    private func performReset() {
+        let currentRecoveredPassword = session.sessionKey ?? ""
+        let targetNewPassword = newPassword
+        
+        Task { @MainActor in
+            do {
+                try await vaultManager.changePassword(vault: vault, oldPassword: currentRecoveredPassword, newPassword: targetNewPassword)
+                recoveredWithKey = false
+                showingResetPassword = false
+                newPassword = ""
+            } catch {
+                errorMessage = "Failed to reset password."
             }
         }
     }
     
     private func handleDrop(urls: [URL]) {
         Task { @MainActor in
-            for url in urls {
-                try? await vaultManager.encryptFile(at: url, session: session, targetFolder: currentFolderURL)
+            do {
+                try await vaultManager.encryptFiles(urls: urls, session: session, targetFolder: currentFolderURL)
+            } catch {
+                errorMessage = "Failed to secure some files: \(error.localizedDescription)"
             }
         }
     }
@@ -390,6 +599,28 @@ struct VaultDetailView: View {
         }
         try? vaultManager.refreshItems(session: session, at: currentFolderURL)
         selection.removeAll()
+    }
+    
+    @ViewBuilder
+    func errorBanner(message: String) -> some View {
+        Text(message)
+            .font(.caption)
+            .foregroundStyle(.white)
+            .padding(8)
+            .frame(maxWidth: 280)
+            .background(Color.red.opacity(0.8))
+            .cornerRadius(8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+    }
+    
+    var recoveryStatusIndicator: some View {
+        HStack(spacing: 4) {
+            Image(systemName: vault.encryptedMasterPassword != nil ? "checkmark.shield.fill" : "xmark.shield.fill")
+            Text(vault.encryptedMasterPassword != nil ? "Recovery Enabled" : "No Recovery Data")
+        }
+        .font(.system(size: 10, weight: .bold))
+        .foregroundStyle(vault.encryptedMasterPassword != nil ? Color.green.opacity(0.7) : Color.red.opacity(0.7))
+        .padding(.top, 10)
     }
 }
 

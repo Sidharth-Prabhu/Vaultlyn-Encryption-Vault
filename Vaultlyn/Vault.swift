@@ -11,7 +11,13 @@ final class Vault {
     var verificationData: Data?
     var bookmarkData: Data?
     
-    init(name: String, rootPath: String, salt: Data, verificationData: Data? = nil, bookmarkData: Data? = nil) {
+    // Recovery & Brute Force Protection
+    var failedAttempts: Int = 0
+    var isLockedOut: Bool = false
+    var recoveryKeyHash: Data?
+    var encryptedMasterPassword: Data? // Master password encrypted with recovery key
+    
+    init(name: String, rootPath: String, salt: Data, verificationData: Data? = nil, bookmarkData: Data? = nil, recoveryKeyHash: Data? = nil, encryptedMasterPassword: Data? = nil) {
         self.id = UUID()
         self.name = name
         self.rootPath = rootPath
@@ -19,5 +25,9 @@ final class Vault {
         self.salt = salt
         self.verificationData = verificationData
         self.bookmarkData = bookmarkData
+        self.recoveryKeyHash = recoveryKeyHash
+        self.encryptedMasterPassword = encryptedMasterPassword
+        self.failedAttempts = 0
+        self.isLockedOut = false
     }
 }

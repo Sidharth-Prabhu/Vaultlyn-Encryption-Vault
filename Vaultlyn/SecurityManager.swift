@@ -47,7 +47,6 @@ class SecurityManager {
     }
     
     /// Encrypts data using AES-GCM.
-    /// - Returns: A combined data object containing the nonce, tag, and ciphertext.
     func encrypt(_ data: Data, password: String, salt: Data) throws -> Data {
         let key = try deriveKey(password: password, salt: salt)
         let sealedBox = try AES.GCM.seal(data, using: key)
@@ -61,6 +60,20 @@ class SecurityManager {
         return try AES.GCM.open(sealedBox, using: key)
     }
     
+    /// Encrypts data using a raw recovery key (64 bytes).
+    func encryptWithRecoveryKey(_ data: Data, recoveryKey: Data) throws -> Data {
+        let key = SymmetricKey(data: SHA256.hash(data: recoveryKey))
+        let sealedBox = try AES.GCM.seal(data, using: key)
+        return sealedBox.combined!
+    }
+    
+    /// Decrypts data using a raw recovery key (64 bytes).
+    func decryptWithRecoveryKey(_ combinedData: Data, recoveryKey: Data) throws -> Data {
+        let key = SymmetricKey(data: SHA256.hash(data: recoveryKey))
+        let sealedBox = try AES.GCM.SealedBox(combined: combinedData)
+        return try AES.GCM.open(sealedBox, using: key)
+    }
+    
     /// Generates a random salt.
     func generateSalt() -> Data {
         var salt = Data(count: saltLength)
@@ -68,5 +81,20 @@ class SecurityManager {
             SecRandomCopyBytes(kSecRandomDefault, saltLength, $0.baseAddress!)
         }
         return salt
+    }
+    
+    /// Generates a random recovery key file content and its hash.
+    func generateRecoveryKey() -> (keyData: Data, hash: Data) {
+        var keyData = Data(count: 64)
+        _ = keyData.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 64, $0.baseAddress!)
+        }
+        let hash = SHA256.hash(data: keyData)
+        return (keyData, Data(hash))
+    }
+    
+    func verifyRecoveryKey(_ keyData: Data, matches hash: Data) -> Bool {
+        let keyHash = SHA256.hash(data: keyData)
+        return Data(keyHash) == hash
     }
 }
