@@ -37,7 +37,7 @@ struct AboutView: View {
             
             // Links & Credits
             VStack(spacing: 16) {
-                Link(destination: URL(string: "https://vaultlyn.app")!) {
+                Link(destination: URL(string: "https://vaultlyn.frissco.net")!) {
                     Label("Visit Website", systemImage: "globe")
                         .frame(maxWidth: .infinity)
                 }
@@ -56,7 +56,7 @@ struct AboutView: View {
                         .frame(height: 24)
                         .shadow(color: .black.opacity(colorScheme == .dark ? 0.3 : 0.1), radius: 1)
                     
-                    Link("Contact Support", destination: URL(string: "mailto:support@frissco.io")!)
+                    Link("Contact Support", destination: URL(string: "mailto:thefrisscoteamofficial@gmail.com")!)
                         .font(.subheadline)
                         .foregroundStyle(.blue)
                 }
