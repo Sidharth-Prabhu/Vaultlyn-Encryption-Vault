@@ -134,7 +134,6 @@ class VaultManager {
         }
         
         // Automatically decrypt all files recursively
-        // IN DECOY MODE: Only decrypt the .decoy folder to prevent errors with real files
         await MainActor.run { s.addLog("Starting recursive decryption...") }
         try await decryptAllFiles(session: s)
         
@@ -294,13 +293,11 @@ class VaultManager {
         while let fileURL = enumerator?.nextObject() as? URL {
             let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
             if resourceValues.isDirectory == false && fileURL.pathExtension != "vaultlyn" {
-                // If in Decoy Mode, ONLY encrypt files within the .decoy folder
                 if session.isDecoyMode {
                     if fileURL.path.contains("/.decoy/") {
                         filesToProcess.append(fileURL)
                     }
                 } else {
-                    // In Master Mode, skip .decoy folder to prevent using master password on decoy files
                     if !fileURL.path.contains("/.decoy/") {
                         filesToProcess.append(fileURL)
                     }
@@ -312,22 +309,37 @@ class VaultManager {
         if totalFiles == 0 { return }
         
         var completed = 0.0
+        var stealthMapping: [String: String] = [:] 
         
         for fileURL in filesToProcess {
             await MainActor.run { session.addLog("Encrypting: \(fileURL.lastPathComponent)") }
             let data = try Data(contentsOf: fileURL)
-            // Use different salt for decoy files if needed, but for simplicity we'll use primary salt
-            // Crucially, the PASSWORD is different, so the derived key is different.
             let saltToUse = session.isDecoyMode ? (session.vault.decoySalt ?? session.vault.salt) : session.vault.salt
-            
             let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: saltToUse)
             
-            let destinationURL = fileURL.appendingPathExtension("vaultlyn")
+            var destinationName = fileURL.lastPathComponent + ".vaultlyn"
+            if session.vault.hasStealth {
+                let stealthUUID = UUID().uuidString
+                destinationName = stealthUUID + ".vaultlyn"
+                stealthMapping[fileURL.lastPathComponent] = stealthUUID
+            }
+            
+            let destinationURL = fileURL.deletingLastPathComponent().appendingPathComponent(destinationName)
             try encryptedData.write(to: destinationURL)
             try FileManager.default.removeItem(at: fileURL)
             
             completed += 1.0
             await MainActor.run { session.progress = completed / totalFiles }
+        }
+        
+        if session.vault.hasStealth && !stealthMapping.isEmpty {
+            await MainActor.run { session.addLog("Securing metadata...") }
+            let metaData = try JSONEncoder().encode(stealthMapping)
+            let saltToUse = session.isDecoyMode ? (session.vault.decoySalt ?? session.vault.salt) : session.vault.salt
+            let encryptedMeta = try SecurityManager.shared.encrypt(metaData, password: password, salt: saltToUse)
+            
+            let metaURL = rootURL.appendingPathComponent(session.isDecoyMode ? ".decoy/.stealth-meta" : ".stealth-meta")
+            try encryptedMeta.write(to: metaURL)
         }
     }
     
@@ -335,13 +347,28 @@ class VaultManager {
         guard let password = session.sessionKey else { return }
         let rootURL = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         
+        var stealthMapping: [String: String] = [:] 
+        if session.vault.hasStealth {
+            let metaURL = rootURL.appendingPathComponent(session.isDecoyMode ? ".decoy/.stealth-meta" : ".stealth-meta")
+            if FileManager.default.fileExists(atPath: metaURL.path) {
+                await MainActor.run { session.addLog("Restoring metadata...") }
+                let encryptedMeta = try Data(contentsOf: metaURL)
+                let saltToUse = session.isDecoyMode ? (session.vault.decoySalt ?? session.vault.salt) : session.vault.salt
+                let metaData = try SecurityManager.shared.decrypt(encryptedMeta, password: password, salt: saltToUse)
+                let mapping = try JSONDecoder().decode([String: String].self, from: metaData)
+                for (original, stealth) in mapping {
+                    stealthMapping[stealth] = original
+                }
+                try? FileManager.default.removeItem(at: metaURL)
+            }
+        }
+        
         let enumerator = FileManager.default.enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         
         var filesToProcess: [URL] = []
         while let fileURL = enumerator?.nextObject() as? URL {
             let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
             if resourceValues.isDirectory == false && fileURL.pathExtension == "vaultlyn" {
-                // CRITICAL FIX: Only decrypt files belonging to the current mode
                 if session.isDecoyMode {
                     if fileURL.path.contains("/.decoy/") {
                         filesToProcess.append(fileURL)
@@ -367,11 +394,16 @@ class VaultManager {
                 let encryptedData = try Data(contentsOf: fileURL)
                 let decryptedData = try SecurityManager.shared.decrypt(encryptedData, password: password, salt: saltToUse)
                 
-                let destinationURL = fileURL.deletingPathExtension()
+                var originalName = fileURL.deletingPathExtension().lastPathComponent
+                if session.vault.hasStealth {
+                    let stealthID = fileURL.deletingPathExtension().lastPathComponent
+                    originalName = stealthMapping[stealthID] ?? originalName
+                }
+                
+                let destinationURL = fileURL.deletingLastPathComponent().appendingPathComponent(originalName)
                 try decryptedData.write(to: destinationURL)
                 try FileManager.default.removeItem(at: fileURL)
             } catch {
-                // Log but don't fail the whole operation if one file fails (might be a cross-mode file)
                 await MainActor.run { session.addLog("SKIPPED: \(fileURL.lastPathComponent) (Decryption failed)") }
             }
             
@@ -380,11 +412,10 @@ class VaultManager {
         }
     }
     
-    func encryptFiles(urls: [URL], session: VaultSession, targetFolder: URL? = nil) async throws {
-        guard let password = session.sessionKey else { return }
+    func importFiles(urls: [URL], session: VaultSession, targetFolder: URL? = nil) async throws {
         var folderURL = targetFolder ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         
-        // Decoy Mode drop handling
+        // Decoy Mode handling
         if session.isDecoyMode && targetFolder == nil {
             let decoyURL = folderURL.appendingPathComponent(".decoy")
             if !FileManager.default.fileExists(atPath: decoyURL.path) {
@@ -406,16 +437,23 @@ class VaultManager {
         let total = Double(urls.count)
         var completed = 0.0
         
-        let saltToUse = session.isDecoyMode ? (session.vault.decoySalt ?? session.vault.salt) : session.vault.salt
-        
         for sourceURL in urls {
-            await MainActor.run { session.addLog("Securing: \(sourceURL.lastPathComponent)") }
+            await MainActor.run { session.addLog("Importing: \(sourceURL.lastPathComponent)") }
             
-            let data = try Data(contentsOf: sourceURL)
-            let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: saltToUse)
+            let destinationURL = folderURL.appendingPathComponent(sourceURL.lastPathComponent)
             
-            let destinationURL = folderURL.appendingPathComponent(sourceURL.lastPathComponent).appendingPathExtension("vaultlyn")
-            try encryptedData.write(to: destinationURL)
+            // Safety check: Don't do anything if source and destination are the same
+            if sourceURL.standardized.path == destinationURL.standardized.path {
+                completed += 1.0
+                await MainActor.run { session.progress = completed / total }
+                continue
+            }
+            
+            // Just copy the file. It will be encrypted when the vault is locked.
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
             
             completed += 1.0
             await MainActor.run { session.progress = completed / total }

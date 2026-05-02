@@ -645,11 +645,19 @@ struct VaultDetailView: View {
     }
     
     private func handleDrop(urls: [URL]) {
+        // Filter out URLs that are already inside this vault to prevent duplicates/re-imports
+        let vaultRoot = URL(fileURLWithPath: vault.rootPath).standardized
+        let externalURLs = urls.filter { url in
+            !url.standardized.path.hasPrefix(vaultRoot.path)
+        }
+        
+        guard !externalURLs.isEmpty else { return }
+        
         Task { @MainActor in
             do {
-                try await vaultManager.encryptFiles(urls: urls, session: session, targetFolder: currentFolderURL)
+                try await vaultManager.importFiles(urls: externalURLs, session: session, targetFolder: currentFolderURL)
             } catch {
-                errorMessage = "Failed to secure some files: \(error.localizedDescription)"
+                errorMessage = "Failed to import some files: \(error.localizedDescription)"
             }
         }
     }

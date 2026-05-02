@@ -17,6 +17,9 @@ struct SidebarView: View {
     @State private var useDecoy = false
     @State private var decoyPassword = ""
     
+    // Stealth state during creation
+    @State private var useStealth = false
+    
     @State private var showingRecoveryWarning = false
     @State private var pendingVaultData: PendingVaultData?
     
@@ -50,6 +53,8 @@ struct SidebarView: View {
         let decoyPassword: String?
         let decoySalt: Data?
         let decoyVerif: Data?
+        // Stealth
+        let hasStealth: Bool
     }
     
     var body: some View {
@@ -137,18 +142,35 @@ struct SidebarView: View {
                     
                     Divider()
                     
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Enable Decoy Mode", isOn: $useDecoy)
-                            .font(.subheadline)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Privacy Features")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        
+                        Toggle(isOn: $useStealth) {
+                            VStack(alignment: .leading) {
+                                Text("Stealth Filenames")
+                                    .font(.subheadline)
+                                Text("Obfuscates names on disk when locked.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        
+                        Toggle(isOn: $useDecoy) {
+                            VStack(alignment: .leading) {
+                                Text("Decoy Mode")
+                                    .font(.subheadline)
+                                Text("Secondary password for hidden access.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                         
                         if useDecoy {
                             SecureField("Decoy Password", text: $decoyPassword)
                                 .textFieldStyle(.roundedBorder)
                                 .transition(.move(edge: .top).combined(with: .opacity))
-                            
-                            Text("When the decoy password is used, the vault will open into a hidden '.decoy' folder instead of your real documents.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
                         }
                     }
                     
@@ -178,7 +200,7 @@ struct SidebarView: View {
             }
             .padding()
         }
-        .frame(width: 450, height: 500)
+        .frame(width: 450, height: 550)
     }
     
     var recoveryKeyWarningSheet: some View {
@@ -341,7 +363,8 @@ struct SidebarView: View {
                 hasDecoy: useDecoy,
                 decoyPassword: useDecoy ? decoyPassword : nil,
                 decoySalt: dSalt,
-                decoyVerif: dVerif
+                decoyVerif: dVerif,
+                hasStealth: useStealth
             )
             
             showingAddVault = false
@@ -373,11 +396,24 @@ struct SidebarView: View {
                     encryptedMasterPassword: data.encryptedMaster,
                     hasDecoy: data.hasDecoy,
                     decoySalt: data.decoySalt,
-                    decoyVerificationData: data.decoyVerif
+                    decoyVerificationData: data.decoyVerif,
+                    hasStealth: data.hasStealth
                 )
                 
                 modelContext.insert(newVault)
                 try modelContext.save()
+                
+                // Select and auto-unlock the new vault
+                let vaultPassword = data.password
+                selectedVault = newVault
+                
+                Task { @MainActor in
+                    do {
+                        try await vaultManager.unlock(vault: newVault, password: vaultPassword)
+                    } catch {
+                        print("Auto-unlock failed: \(error)")
+                    }
+                }
                 
                 resetState()
                 showingRecoveryWarning = false
@@ -409,6 +445,7 @@ struct SidebarView: View {
         newVaultPassword = ""
         decoyPassword = ""
         useDecoy = false
+        useStealth = false
         selectedFolderURL = nil
         pendingVaultData = nil
     }

@@ -22,7 +22,10 @@ final class Vault {
     var decoySalt: Data?
     var decoyVerificationData: Data?
     
-    init(name: String, rootPath: String, salt: Data, verificationData: Data? = nil, bookmarkData: Data? = nil, recoveryKeyHash: Data? = nil, encryptedMasterPassword: Data? = nil, hasDecoy: Bool = false, decoySalt: Data? = nil, decoyVerificationData: Data? = nil) {
+    // Stealth System
+    var hasStealth: Bool = false
+    
+    init(name: String, rootPath: String, salt: Data, verificationData: Data? = nil, bookmarkData: Data? = nil, recoveryKeyHash: Data? = nil, encryptedMasterPassword: Data? = nil, hasDecoy: Bool = false, decoySalt: Data? = nil, decoyVerificationData: Data? = nil, hasStealth: Bool = false) {
         self.id = UUID()
         self.name = name
         self.rootPath = rootPath
@@ -35,6 +38,7 @@ final class Vault {
         self.hasDecoy = hasDecoy
         self.decoySalt = decoySalt
         self.decoyVerificationData = decoyVerificationData
+        self.hasStealth = hasStealth
         self.failedAttempts = 0
         self.isLockedOut = false
     }
