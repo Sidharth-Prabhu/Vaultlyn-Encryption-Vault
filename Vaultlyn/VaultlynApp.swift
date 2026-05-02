@@ -4,6 +4,7 @@ import SwiftData
 @main
 struct VaultlynApp: App {
     @State private var showingAbout = false
+    @State private var vaultManager = VaultManager.shared
     
     var body: some Scene {
         WindowGroup {
@@ -30,29 +31,34 @@ struct VaultlynApp: App {
                 
                 Divider()
                 
-                Button("Lock Active Vault") {
-                    Task { @MainActor in
-                        await VaultManager.shared.lock()
+                Button("Lock Selected Vault") {
+                    if let vault = vaultManager.selectedVault {
+                        Task { @MainActor in
+                            await vaultManager.lock(vault: vault)
+                        }
                     }
                 }
                 .keyboardShortcut("l", modifiers: .command)
-                .disabled(!VaultManager.shared.isUnlocked)
+                .disabled(vaultManager.selectedVault == nil || vaultManager.sessions[vaultManager.selectedVault?.id ?? UUID()]?.isUnlocked != true)
             }
             
             // Vault Menu
             CommandMenu("Vault") {
                 Button("Refresh Files") {
-                    try? VaultManager.shared.refreshItems()
+                    if let vault = vaultManager.selectedVault,
+                       let session = vaultManager.sessions[vault.id] {
+                        try? vaultManager.refreshItems(session: session)
+                    }
                 }
                 .keyboardShortcut("r", modifiers: .command)
-                .disabled(!VaultManager.shared.isUnlocked)
+                .disabled(vaultManager.selectedVault == nil || vaultManager.sessions[vaultManager.selectedVault?.id ?? UUID()]?.isUnlocked != true)
                 
                 Divider()
                 
                 Button("Change Password...") {
                     NotificationCenter.default.post(name: NSNotification.Name("ShowChangePasswordSheet"), object: nil)
                 }
-                .disabled(!VaultManager.shared.isUnlocked)
+                .disabled(vaultManager.selectedVault == nil || vaultManager.sessions[vaultManager.selectedVault?.id ?? UUID()]?.isUnlocked != true)
             }
             
             // Help Menu

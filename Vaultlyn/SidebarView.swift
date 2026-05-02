@@ -82,6 +82,9 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            .onChange(of: selectedVault) { _, newValue in
+                vaultManager.selectedVault = newValue
+            }
             
             Divider()
             
@@ -128,7 +131,7 @@ struct SidebarView: View {
             showingAddVault = true
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowChangePasswordSheet"))) { _ in
-            if let vault = vaultManager.activeVault {
+            if let vault = selectedVault, isUnlocked(vault) {
                 vaultToChangePassword = vault
                 showingChangePassword = true
             }
@@ -136,7 +139,7 @@ struct SidebarView: View {
     }
     
     private func isUnlocked(_ vault: Vault) -> Bool {
-        vaultManager.activeVault?.id == vault.id && vaultManager.isUnlocked
+        vaultManager.sessions[vault.id]?.isUnlocked == true
     }
     
     var createVaultSheet: some View {

@@ -14,7 +14,7 @@ struct ContentView: View {
             if isInitializing {
                 VStack {
                     ProgressView()
-                    Text("Restoring session...")
+                    Text("Restoring sessions...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -35,18 +35,28 @@ struct ContentView: View {
     }
     
     private func attemptAutoUnlock() {
-        guard let lastVaultID = UserDefaults.standard.string(forKey: "lastActiveVaultID"),
-              let vault = vaults.first(where: { $0.id.uuidString == lastVaultID }),
-              let password = KeychainHelper.shared.read(for: lastVaultID) else {
+        let unlockedIDs = UserDefaults.standard.stringArray(forKey: "unlockedVaultIDs") ?? []
+        
+        if unlockedIDs.isEmpty {
             isInitializing = false
             return
         }
         
-        selectedVault = vault
         Task {
-            // Attempt auto-unlock without re-persisting (already in keychain)
-            try? await VaultManager.shared.unlock(vault: vault, password: password, persist: false)
+            for vaultID in unlockedIDs {
+                if let vault = vaults.first(where: { $0.id.uuidString == vaultID }),
+                   let password = KeychainHelper.shared.read(for: vaultID) {
+                    
+                    // Attempt auto-unlock without re-persisting (already in keychain)
+                    try? await VaultManager.shared.unlock(vault: vault, password: password, persist: false)
+                }
+            }
+            
             await MainActor.run {
+                // Set the selected vault to the first one we restored, if any
+                if let firstID = unlockedIDs.first {
+                    selectedVault = vaults.first(where: { $0.id.uuidString == firstID })
+                }
                 isInitializing = false
             }
         }

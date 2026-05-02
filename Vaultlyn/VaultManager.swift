@@ -10,41 +10,64 @@ struct VaultItem: Identifiable, Hashable {
 }
 
 @Observable
-class VaultManager {
-    static let shared = VaultManager()
-    
-    var activeVault: Vault?
+class VaultSession {
+    let vault: Vault
     var unlockedItems: [VaultItem] = []
     var isUnlocked: Bool = false
     var isProcessing: Bool = false
+    var progress: Double = 0.0
     var logs: [String] = []
     
-    private var sessionKey: String? // Store password temporarily in memory
-    private var scopedURL: URL? // Keep the security-scoped URL active
+    fileprivate var sessionKey: String?
+    fileprivate var scopedURL: URL?
     
-    private init() {}
+    init(vault: Vault) {
+        self.vault = vault
+    }
     
     @MainActor
-    private func addLog(_ message: String) {
+    func addLog(_ message: String) {
         logs.append("[\(Date().formatted(date: .omitted, time: .standard))] \(message)")
         if logs.count > 100 {
             logs.removeFirst()
         }
     }
+}
+
+@Observable
+class VaultManager {
+    static let shared = VaultManager()
+    
+    var sessions: [UUID: VaultSession] = [:]
+    var selectedVault: Vault?
+    
+    private init() {}
+    
+    func session(for vault: Vault) -> VaultSession {
+        if let existing = sessions[vault.id] {
+            return existing
+        }
+        let newSession = VaultSession(vault: vault)
+        sessions[vault.id] = newSession
+        return newSession
+    }
     
     func unlock(vault: Vault, password: String, persist: Bool = true) async throws {
+        let s = session(for: vault)
+        
         await MainActor.run { 
-            self.isProcessing = true
-            self.logs = ["Initializing unlock sequence..."]
+            s.isProcessing = true
+            s.progress = 0.0
+            s.logs = ["Initializing unlock sequence..."]
         }
         
         defer { 
-            Task { @MainActor in self.isProcessing = false }
+            Task { @MainActor in s.isProcessing = false }
         }
         
         // Resolve security-scoped bookmark
         if let bookmarkData = vault.bookmarkData {
-            await MainActor.run { self.addLog("Resolving security-scoped bookmark...") }
+            await MainActor.run { s.addLog("Resolving security-scoped bookmark...") }
             var isStale = false
             let folderURL = try URL(
                 resolvingBookmarkData: bookmarkData,
@@ -54,91 +77,109 @@ class VaultManager {
             )
             
             if folderURL.startAccessingSecurityScopedResource() {
-                self.scopedURL = folderURL
+                s.scopedURL = folderURL
             } else {
-                await MainActor.run { self.addLog("ERROR: Failed to access security scoped resource.") }
+                await MainActor.run { s.addLog("ERROR: Failed to access security scoped resource.") }
                 throw SecurityError.invalidData
             }
         }
         
         // Verify password
-        await MainActor.run { self.addLog("Verifying master password...") }
+        await MainActor.run { s.addLog("Verifying master password...") }
         if let verificationData = vault.verificationData {
             let decryptedData = try SecurityManager.shared.decrypt(verificationData, password: password, salt: vault.salt)
             let verificationString = String(data: decryptedData, encoding: .utf8)
             guard verificationString == "vaultlyn-verified" else {
-                await MainActor.run { self.addLog("ERROR: Invalid password.") }
+                await MainActor.run { s.addLog("ERROR: Invalid password.") }
                 throw SecurityError.decryptionFailed
             }
         }
         
-        self.activeVault = vault
-        self.sessionKey = password
+        s.sessionKey = password
         
         if persist {
             KeychainHelper.shared.save(password, for: vault.id.uuidString)
-            UserDefaults.standard.set(vault.id.uuidString, forKey: "lastActiveVaultID")
+            saveUnlockedVaultID(vault.id.uuidString)
         }
         
         // Automatically decrypt all files recursively
-        await MainActor.run { self.addLog("Starting recursive decryption...") }
-        try await decryptAllFiles()
+        await MainActor.run { s.addLog("Starting recursive decryption...") }
+        try await decryptAllFiles(session: s)
         
         await MainActor.run { 
-            self.addLog("Unlock complete.")
-            self.isUnlocked = true
-            try? refreshItems()
+            s.addLog("Unlock complete.")
+            s.progress = 1.0
+            s.isUnlocked = true
+            try? refreshItems(session: s)
         }
     }
     
-    func lock() async {
+    func lock(vault: Vault) async {
+        guard let s = sessions[vault.id] else { return }
+        
         await MainActor.run { 
-            self.isProcessing = true 
-            self.logs = ["Initializing lock sequence..."]
+            s.isProcessing = true 
+            s.progress = 0.0
+            s.logs = ["Initializing lock sequence..."]
         }
         
-        if let vault = activeVault {
-            KeychainHelper.shared.delete(for: vault.id.uuidString)
-            UserDefaults.standard.removeObject(forKey: "lastActiveVaultID")
-        }
+        KeychainHelper.shared.delete(for: vault.id.uuidString)
+        removeUnlockedVaultID(vault.id.uuidString)
         
         // Automatically encrypt all files recursively
         do {
-            await MainActor.run { self.addLog("Starting recursive encryption...") }
-            try await encryptAllFiles()
-            await MainActor.run { self.addLog("Encryption complete.") }
+            await MainActor.run { s.addLog("Starting recursive encryption...") }
+            try await encryptAllFiles(session: s)
+            await MainActor.run { s.addLog("Encryption complete.") }
         } catch {
-            await MainActor.run { self.addLog("ERROR: Encryption failed: \(error.localizedDescription)") }
+            await MainActor.run { s.addLog("ERROR: Encryption failed: \(error.localizedDescription)") }
         }
         
         // Clean up
-        self.scopedURL?.stopAccessingSecurityScopedResource()
-        self.scopedURL = nil
-        self.activeVault = nil
-        self.sessionKey = nil
+        s.scopedURL?.stopAccessingSecurityScopedResource()
+        s.scopedURL = nil
+        s.sessionKey = nil
         
         await MainActor.run {
-            self.isUnlocked = false
-            self.unlockedItems = []
-            self.isProcessing = false
+            s.isUnlocked = false
+            s.unlockedItems = []
+            s.progress = 1.0
+            s.isProcessing = false
         }
     }
     
+    private func saveUnlockedVaultID(_ id: String) {
+        var ids = UserDefaults.standard.stringArray(forKey: "unlockedVaultIDs") ?? []
+        if !ids.contains(id) {
+            ids.append(id)
+            UserDefaults.standard.set(ids, forKey: "unlockedVaultIDs")
+        }
+    }
+    
+    private func removeUnlockedVaultID(_ id: String) {
+        var ids = UserDefaults.standard.stringArray(forKey: "unlockedVaultIDs") ?? []
+        ids.removeAll { $0 == id }
+        UserDefaults.standard.set(ids, forKey: "unlockedVaultIDs")
+    }
+    
     func changePassword(vault: Vault, oldPassword: String, newPassword: String) async throws {
+        let s = session(for: vault)
+        
         await MainActor.run { 
-            self.isProcessing = true
-            self.logs = ["Initializing password change..."]
+            s.isProcessing = true
+            s.progress = 0.0
+            s.logs = ["Initializing password change..."]
         }
         
         defer { 
-            Task { @MainActor in self.isProcessing = false }
+            Task { @MainActor in s.isProcessing = false }
         }
         
         if let bookmarkData = vault.bookmarkData {
             var isStale = false
             let folderURL = try URL(resolvingBookmarkData: bookmarkData, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale)
             if folderURL.startAccessingSecurityScopedResource() {
-                self.scopedURL = folderURL
+                s.scopedURL = folderURL
             }
         }
         
@@ -148,42 +189,39 @@ class VaultManager {
             guard verificationString == "vaultlyn-verified" else { throw SecurityError.decryptionFailed }
         }
         
-        self.activeVault = vault
-        self.sessionKey = oldPassword
+        s.sessionKey = oldPassword
         
-        await MainActor.run { self.addLog("Decrypting files with old password...") }
-        try await decryptAllFiles()
+        await MainActor.run { s.addLog("Decrypting files with old password...") }
+        try await decryptAllFiles(session: s)
         
-        await MainActor.run { self.addLog("Generating new verification data...") }
+        await MainActor.run { s.addLog("Generating new verification data...") }
         let newVerificationData = try SecurityManager.shared.encrypt(
             Data("vaultlyn-verified".utf8),
             password: newPassword,
             salt: vault.salt
         )
         vault.verificationData = newVerificationData
-        self.sessionKey = newPassword
+        s.sessionKey = newPassword
         
         // Update Keychain
         KeychainHelper.shared.save(newPassword, for: vault.id.uuidString)
         
-        await MainActor.run { self.addLog("Re-encrypting files with new password...") }
-        try await encryptAllFiles()
+        await MainActor.run { s.addLog("Re-encrypting files with new password...") }
+        try await encryptAllFiles(session: s)
         
-        await MainActor.run { self.addLog("Password changed successfully.") }
+        await MainActor.run { s.addLog("Password changed successfully.") }
         
-        self.scopedURL?.stopAccessingSecurityScopedResource()
-        self.scopedURL = nil
-        self.activeVault = nil
-        self.sessionKey = nil
+        s.scopedURL?.stopAccessingSecurityScopedResource()
+        s.scopedURL = nil
+        s.sessionKey = nil
     }
     
-    func refreshItems() throws {
-        guard let vault = activeVault else { return }
-        let url = scopedURL ?? URL(fileURLWithPath: vault.rootPath)
+    func refreshItems(session: VaultSession) throws {
+        let url = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         
         let fileURLs = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
         
-        self.unlockedItems = fileURLs
+        session.unlockedItems = fileURLs
             .filter { !$0.lastPathComponent.hasPrefix(".") }
             .map { url in
                 let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
@@ -196,54 +234,62 @@ class VaultManager {
             }
     }
     
-    private func encryptAllFiles() async throws {
-        guard let vault = activeVault, let password = sessionKey else { return }
-        let rootURL = scopedURL ?? URL(fileURLWithPath: vault.rootPath)
+    private func encryptAllFiles(session: VaultSession) async throws {
+        guard let password = session.sessionKey else { return }
+        let rootURL = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         
-        let enumerator = FileManager.default.enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        let fileURLs = try FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey])
+            .filter { try! $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == false && $0.pathExtension != "vaultlyn" && !$0.lastPathComponent.hasPrefix(".") }
         
-        while let fileURL = enumerator?.nextObject() as? URL {
-            let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
-            if resourceValues.isDirectory == true { continue }
-            if fileURL.pathExtension == "vaultlyn" { continue }
-            
-            await MainActor.run { self.addLog("Encrypting: \(fileURL.lastPathComponent)") }
+        let totalFiles = Double(fileURLs.count)
+        if totalFiles == 0 { return }
+        
+        var completed = 0.0
+        
+        for fileURL in fileURLs {
+            await MainActor.run { session.addLog("Encrypting: \(fileURL.lastPathComponent)") }
             let data = try Data(contentsOf: fileURL)
-            let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: vault.salt)
+            let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: session.vault.salt)
             
             let destinationURL = fileURL.appendingPathExtension("vaultlyn")
             try encryptedData.write(to: destinationURL)
             try FileManager.default.removeItem(at: fileURL)
-        }
-    }
-    
-    private func decryptAllFiles() async throws {
-        guard let vault = activeVault, let password = sessionKey else { return }
-        let rootURL = scopedURL ?? URL(fileURLWithPath: vault.rootPath)
-        
-        let enumerator = FileManager.default.enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
-        
-        while let fileURL = enumerator?.nextObject() as? URL {
-            let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
-            if resourceValues.isDirectory == true { continue }
             
-            if fileURL.pathExtension == "vaultlyn" {
-                await MainActor.run { self.addLog("Decrypting: \(fileURL.lastPathComponent)") }
-                let encryptedData = try Data(contentsOf: fileURL)
-                let decryptedData = try SecurityManager.shared.decrypt(encryptedData, password: password, salt: vault.salt)
-                
-                let destinationURL = fileURL.deletingPathExtension()
-                try decryptedData.write(to: destinationURL)
-                try FileManager.default.removeItem(at: fileURL)
-            }
+            completed += 1.0
+            await MainActor.run { session.progress = completed / totalFiles }
         }
     }
     
-    func encryptFile(at sourceURL: URL) async throws {
-        guard let vault = activeVault else { return }
-        let url = scopedURL ?? URL(fileURLWithPath: vault.rootPath)
+    private func decryptAllFiles(session: VaultSession) async throws {
+        guard let password = session.sessionKey else { return }
+        let rootURL = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
+        
+        let fileURLs = try FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey])
+            .filter { try! $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == false && $0.pathExtension == "vaultlyn" }
+        
+        let totalFiles = Double(fileURLs.count)
+        if totalFiles == 0 { return }
+        
+        var completed = 0.0
+        
+        for fileURL in fileURLs {
+            await MainActor.run { session.addLog("Decrypting: \(fileURL.lastPathComponent)") }
+            let encryptedData = try Data(contentsOf: fileURL)
+            let decryptedData = try SecurityManager.shared.decrypt(encryptedData, password: password, salt: session.vault.salt)
+            
+            let destinationURL = fileURL.deletingPathExtension()
+            try decryptedData.write(to: destinationURL)
+            try FileManager.default.removeItem(at: fileURL)
+            
+            completed += 1.0
+            await MainActor.run { session.progress = completed / totalFiles }
+        }
+    }
+    
+    func encryptFile(at sourceURL: URL, session: VaultSession) async throws {
+        let url = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         let destinationURL = url.appendingPathComponent(sourceURL.lastPathComponent)
         try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-        try refreshItems()
+        try refreshItems(session: session)
     }
 }

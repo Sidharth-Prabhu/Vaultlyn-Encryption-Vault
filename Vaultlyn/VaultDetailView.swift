@@ -11,23 +11,28 @@ struct VaultDetailView: View {
     @State private var previewURL: URL?
     @State private var searchText = ""
     
+    // Get the specific session for this vault
+    private var session: VaultSession {
+        vaultManager.session(for: vault)
+    }
+    
     let columns = [
         GridItem(.adaptive(minimum: 100, maximum: 120), spacing: 20)
     ]
     
     var filteredItems: [VaultItem] {
         if searchText.isEmpty {
-            return vaultManager.unlockedItems
+            return session.unlockedItems
         } else {
-            return vaultManager.unlockedItems.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+            return session.unlockedItems.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
         }
     }
     
     var body: some View {
         ZStack {
-            if vaultManager.activeVault?.id == vault.id && vaultManager.isUnlocked {
+            if session.isUnlocked {
                 unlockedView
-            } else if vaultManager.isProcessing {
+            } else if session.isProcessing {
                 processingView
             } else {
                 lockedView
@@ -35,11 +40,11 @@ struct VaultDetailView: View {
         }
         .navigationTitle(vault.name)
         .toolbar {
-            if vaultManager.isUnlocked {
+            if session.isUnlocked {
                 ToolbarItem {
                     Button(action: { 
                         Task { @MainActor in
-                            await vaultManager.lock()
+                            await vaultManager.lock(vault: vault)
                         }
                     }) {
                         Label("Lock", systemImage: "lock.fill")
@@ -52,7 +57,7 @@ struct VaultDetailView: View {
     
     var unlockedView: some View {
         ScrollView {
-            if vaultManager.unlockedItems.isEmpty {
+            if session.unlockedItems.isEmpty {
                 emptyVaultView
             } else if filteredItems.isEmpty {
                 noSearchResultsView
@@ -61,7 +66,7 @@ struct VaultDetailView: View {
             }
         }
         .background(Color(NSColor.controlBackgroundColor))
-        .searchable(text: $searchText, placement: .sidebar, prompt: "Search files...")
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search files...")
         .dropDestination(for: URL.self) { urls, _ in
             handleDrop(urls: urls)
             return true
@@ -158,20 +163,30 @@ struct VaultDetailView: View {
                 unlock()
             }
             .buttonStyle(.borderedProminent)
-            .disabled(password.isEmpty || vaultManager.isProcessing)
+            .disabled(password.isEmpty || session.isProcessing)
         }
         .padding()
     }
     
     var processingView: some View {
         VStack(spacing: 0) {
-            HStack {
-                ProgressView()
-                    .scaleEffect(0.7)
-                    .padding(.trailing, 8)
-                Text(vaultManager.isUnlocked ? "Securing Vault..." : "Unlocking Vault...")
-                    .font(.headline)
-                Spacer()
+            VStack(spacing: 12) {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 20, height: 20)
+                    Text(session.isUnlocked ? "Securing Vault..." : "Unlocking Vault...")
+                        .font(.headline)
+                    Spacer()
+                    Text("\(Int(session.progress * 100))%")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                
+                ProgressView(value: session.progress)
+                    .progressViewStyle(.linear)
+                    .tint(.green)
+                    .frame(height: 4)
             }
             .padding()
             .background(.ultraThinMaterial)
@@ -179,18 +194,18 @@ struct VaultDetailView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(vaultManager.logs.indices, id: \.self) { index in
-                            Text(vaultManager.logs[index])
+                        ForEach(session.logs.indices, id: \.self) { index in
+                            Text(session.logs[index])
                                 .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(vaultManager.logs[index].contains("ERROR") ? .red : .green.opacity(0.8))
+                                .foregroundStyle(session.logs[index].contains("ERROR") ? .red : .green.opacity(0.8))
                                 .id(index)
                         }
                     }
                     .padding()
                 }
                 .background(Color.black.opacity(0.8))
-                .onChange(of: vaultManager.logs.count) { _, _ in
-                    if let lastIndex = vaultManager.logs.indices.last {
+                .onChange(of: session.logs.count) { _, _ in
+                    if let lastIndex = session.logs.indices.last {
                         proxy.scrollTo(lastIndex, anchor: .bottom)
                     }
                 }
@@ -218,14 +233,14 @@ struct VaultDetailView: View {
     private func handleDrop(urls: [URL]) {
         Task { @MainActor in
             for url in urls {
-                try? await vaultManager.encryptFile(at: url)
+                try? await vaultManager.encryptFile(at: url, session: session)
             }
         }
     }
     
     private func deleteItem(_ item: VaultItem) {
         try? FileManager.default.removeItem(at: item.url)
-        try? vaultManager.refreshItems()
+        try? vaultManager.refreshItems(session: session)
         if selectedItem?.id == item.id {
             selectedItem = nil
         }
