@@ -7,6 +7,7 @@ struct VaultItem: Identifiable, Hashable {
     let url: URL
     let size: Int64
     let modificationDate: Date
+    let isDirectory: Bool
 }
 
 @Observable
@@ -18,8 +19,8 @@ class VaultSession {
     var progress: Double = 0.0
     var logs: [String] = []
     
-    fileprivate var sessionKey: String?
-    fileprivate var scopedURL: URL?
+    var sessionKey: String?
+    var scopedURL: URL?
     
     init(vault: Vault) {
         self.vault = vault
@@ -216,21 +217,29 @@ class VaultManager {
         s.sessionKey = nil
     }
     
-    func refreshItems(session: VaultSession) throws {
-        let url = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
+    func refreshItems(session: VaultSession, at folderURL: URL? = nil) throws {
+        let url = folderURL ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         
-        let fileURLs = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
+        let fileURLs = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
         
         session.unlockedItems = fileURLs
             .filter { !$0.lastPathComponent.hasPrefix(".") }
             .map { url in
                 let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+                let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey])
                 return VaultItem(
                     name: url.lastPathComponent,
                     url: url,
                     size: attributes?[.size] as? Int64 ?? 0,
-                    modificationDate: attributes?[.modificationDate] as? Date ?? Date()
+                    modificationDate: attributes?[.modificationDate] as? Date ?? Date(),
+                    isDirectory: resourceValues?.isDirectory ?? false
                 )
+            }
+            .sorted { (a, b) in
+                if a.isDirectory != b.isDirectory {
+                    return a.isDirectory // Folders first
+                }
+                return a.name.localizedCompare(b.name) == .orderedAscending
             }
     }
     
@@ -238,15 +247,22 @@ class VaultManager {
         guard let password = session.sessionKey else { return }
         let rootURL = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         
-        let fileURLs = try FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey])
-            .filter { try! $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == false && $0.pathExtension != "vaultlyn" && !$0.lastPathComponent.hasPrefix(".") }
+        let enumerator = FileManager.default.enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         
-        let totalFiles = Double(fileURLs.count)
+        var filesToProcess: [URL] = []
+        while let fileURL = enumerator?.nextObject() as? URL {
+            let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
+            if resourceValues.isDirectory == false && fileURL.pathExtension != "vaultlyn" {
+                filesToProcess.append(fileURL)
+            }
+        }
+        
+        let totalFiles = Double(filesToProcess.count)
         if totalFiles == 0 { return }
         
         var completed = 0.0
         
-        for fileURL in fileURLs {
+        for fileURL in filesToProcess {
             await MainActor.run { session.addLog("Encrypting: \(fileURL.lastPathComponent)") }
             let data = try Data(contentsOf: fileURL)
             let encryptedData = try SecurityManager.shared.encrypt(data, password: password, salt: session.vault.salt)
@@ -264,15 +280,22 @@ class VaultManager {
         guard let password = session.sessionKey else { return }
         let rootURL = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         
-        let fileURLs = try FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey])
-            .filter { try! $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == false && $0.pathExtension == "vaultlyn" }
+        let enumerator = FileManager.default.enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         
-        let totalFiles = Double(fileURLs.count)
+        var filesToProcess: [URL] = []
+        while let fileURL = enumerator?.nextObject() as? URL {
+            let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
+            if resourceValues.isDirectory == false && fileURL.pathExtension == "vaultlyn" {
+                filesToProcess.append(fileURL)
+            }
+        }
+        
+        let totalFiles = Double(filesToProcess.count)
         if totalFiles == 0 { return }
         
         var completed = 0.0
         
-        for fileURL in fileURLs {
+        for fileURL in filesToProcess {
             await MainActor.run { session.addLog("Decrypting: \(fileURL.lastPathComponent)") }
             let encryptedData = try Data(contentsOf: fileURL)
             let decryptedData = try SecurityManager.shared.decrypt(encryptedData, password: password, salt: session.vault.salt)
@@ -286,10 +309,10 @@ class VaultManager {
         }
     }
     
-    func encryptFile(at sourceURL: URL, session: VaultSession) async throws {
-        let url = session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
+    func encryptFile(at sourceURL: URL, session: VaultSession, targetFolder: URL? = nil) async throws {
+        let url = targetFolder ?? session.scopedURL ?? URL(fileURLWithPath: session.vault.rootPath)
         let destinationURL = url.appendingPathComponent(sourceURL.lastPathComponent)
         try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-        try refreshItems(session: session)
+        try refreshItems(session: session, at: url)
     }
 }

@@ -7,13 +7,24 @@ struct VaultDetailView: View {
     @State private var vaultManager = VaultManager.shared
     @State private var password = ""
     @State private var error: String?
-    @State private var selectedItem: VaultItem?
+    @State private var selection: Set<UUID> = []
     @State private var previewURL: URL?
     @State private var searchText = ""
     
-    // Get the specific session for this vault
+    // Navigation state
+    @State private var navigationStack: [URL] = []
+    
+    // Marquee selection state
+    @State private var dragStart: CGPoint?
+    @State private var dragEnd: CGPoint?
+    @State private var itemFrames: [UUID: CGRect] = [:]
+    
     private var session: VaultSession {
         vaultManager.session(for: vault)
+    }
+    
+    private var currentFolderURL: URL {
+        navigationStack.last ?? session.scopedURL ?? URL(fileURLWithPath: vault.rootPath)
     }
     
     let columns = [
@@ -29,18 +40,49 @@ struct VaultDetailView: View {
     }
     
     var body: some View {
-        ZStack {
-            if session.isUnlocked {
-                unlockedView
-            } else if session.isProcessing {
-                processingView
-            } else {
-                lockedView
+        ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                if session.isUnlocked {
+                    breadcrumbBar
+                    Divider()
+                    unlockedView
+                } else if session.isProcessing {
+                    processingView
+                } else {
+                    lockedView
+                }
+            }
+            
+            // Marquee Rect
+            if let start = dragStart, let end = dragEnd {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.2))
+                    .border(Color.accentColor.opacity(0.5), width: 1)
+                    .frame(
+                        width: abs(end.x - start.x),
+                        height: abs(end.y - start.y)
+                    )
+                    .offset(
+                        x: min(start.x, end.x),
+                        y: min(start.y, end.y)
+                    )
             }
         }
         .navigationTitle(vault.name)
         .toolbar {
             if session.isUnlocked {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        if !navigationStack.isEmpty {
+                            navigationStack.removeLast()
+                            try? vaultManager.refreshItems(session: session, at: currentFolderURL)
+                        }
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .disabled(navigationStack.isEmpty)
+                }
+                
                 ToolbarItem {
                     Button(action: { 
                         Task { @MainActor in
@@ -53,17 +95,72 @@ struct VaultDetailView: View {
             }
         }
         .quickLookPreview($previewURL)
+        .onChange(of: vault) { _, _ in
+            navigationStack = []
+            if session.isUnlocked {
+                try? vaultManager.refreshItems(session: session, at: currentFolderURL)
+            }
+        }
+    }
+    
+    var breadcrumbBar: some View {
+        HStack {
+            Button {
+                navigationStack = []
+                try? vaultManager.refreshItems(session: session, at: currentFolderURL)
+            } label: {
+                Image(systemName: "house.fill")
+            }
+            .buttonStyle(.plain)
+            
+            ForEach(navigationStack.indices, id: \.self) { index in
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                
+                Button {
+                    navigationStack = Array(navigationStack.prefix(index + 1))
+                    try? vaultManager.refreshItems(session: session, at: currentFolderURL)
+                } label: {
+                    Text(navigationStack[index].lastPathComponent)
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.windowBackgroundColor))
     }
     
     var unlockedView: some View {
         ScrollView {
-            if session.unlockedItems.isEmpty {
-                emptyVaultView
-            } else if filteredItems.isEmpty {
-                noSearchResultsView
-            } else {
-                fileGridView
+            VStack {
+                if session.unlockedItems.isEmpty {
+                    emptyVaultView
+                } else if filteredItems.isEmpty {
+                    noSearchResultsView
+                } else {
+                    fileGridView
+                }
             }
+            .frame(maxWidth: .infinity, minHeight: 600, alignment: .top)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                selection.removeAll()
+            }
+            .gesture(
+                DragGesture(minimumDistance: 10)
+                    .onChanged { value in
+                        if dragStart == nil { dragStart = value.startLocation }
+                        dragEnd = value.location
+                        updateSelectionForMarquee()
+                    }
+                    .onEnded { _ in
+                        dragStart = nil
+                        dragEnd = nil
+                    }
+            )
         }
         .background(Color(NSColor.controlBackgroundColor))
         .searchable(text: $searchText, placement: .toolbar, prompt: "Search files...")
@@ -72,8 +169,8 @@ struct VaultDetailView: View {
             return true
         }
         .onKeyPress(.space) {
-            if let selected = selectedItem {
-                previewURL = selected.url
+            if let first = selection.first, let item = filteredItems.first(where: { $0.id == first }) {
+                previewURL = item.url
                 return .handled
             }
             return .ignored
@@ -97,18 +194,50 @@ struct VaultDetailView: View {
     private var fileGridView: some View {
         LazyVGrid(columns: columns, spacing: 20) {
             ForEach(filteredItems) { item in
-                FileGridView(item: item, isSelected: selectedItem?.id == item.id)
+                FileGridView(item: item, isSelected: selection.contains(item.id))
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear
+                                .onAppear {
+                                    itemFrames[item.id] = geo.frame(in: .named("container"))
+                                }
+                                .onChange(of: geo.frame(in: .named("container"))) { _, newValue in
+                                    itemFrames[item.id] = newValue
+                                }
+                        }
+                    )
                     .onTapGesture {
-                        selectedItem = item
+                        if NSEvent.modifierFlags.contains(.command) {
+                            if selection.contains(item.id) {
+                                selection.remove(item.id)
+                            } else {
+                                selection.insert(item.id)
+                            }
+                        } else {
+                            selection = [item.id]
+                        }
                     }
                     .onTapGesture(count: 2) {
-                        previewURL = item.url
+                        if item.isDirectory {
+                            navigationStack.append(item.url)
+                            try? vaultManager.refreshItems(session: session, at: item.url)
+                            selection.removeAll()
+                        } else {
+                            previewURL = item.url
+                        }
                     }
                     .contextMenu {
-                        Button {
-                            previewURL = item.url
-                        } label: {
-                            Label("Quick Look", systemImage: "eye")
+                        if item.isDirectory {
+                            Button("Open Folder") {
+                                navigationStack.append(item.url)
+                                try? vaultManager.refreshItems(session: session, at: item.url)
+                            }
+                        } else {
+                            Button {
+                                previewURL = item.url
+                            } label: {
+                                Label("Quick Look", systemImage: "eye")
+                            }
                         }
                         
                         Button {
@@ -119,24 +248,40 @@ struct VaultDetailView: View {
                         
                         Divider()
                         
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(item.url.path, forType: .string)
-                        } label: {
-                            Label("Copy Path", systemImage: "doc.on.doc")
-                        }
-                        
-                        Divider()
-                        
                         Button(role: .destructive) {
-                            deleteItem(item)
+                            deleteItems()
                         } label: {
-                            Label("Delete", systemImage: "trash")
+                            Label("Delete Selected", systemImage: "trash")
                         }
                     }
+                    .draggable(item.url)
             }
         }
         .padding()
+        .coordinateSpace(name: "container")
+    }
+    
+    private func updateSelectionForMarquee() {
+        guard let start = dragStart, let end = dragEnd else { return }
+        let marqueeRect = CGRect(
+            x: min(start.x, end.x),
+            y: min(start.y, end.y),
+            width: abs(end.x - start.x),
+            height: abs(end.y - start.y)
+        )
+        
+        var newSelection = Set<UUID>()
+        for (id, frame) in itemFrames {
+            if marqueeRect.intersects(frame) {
+                newSelection.insert(id)
+            }
+        }
+        
+        if NSEvent.modifierFlags.contains(.command) {
+            selection.formUnion(newSelection)
+        } else {
+            selection = newSelection
+        }
     }
     
     var lockedView: some View {
@@ -233,17 +378,18 @@ struct VaultDetailView: View {
     private func handleDrop(urls: [URL]) {
         Task { @MainActor in
             for url in urls {
-                try? await vaultManager.encryptFile(at: url, session: session)
+                try? await vaultManager.encryptFile(at: url, session: session, targetFolder: currentFolderURL)
             }
         }
     }
     
-    private func deleteItem(_ item: VaultItem) {
-        try? FileManager.default.removeItem(at: item.url)
-        try? vaultManager.refreshItems(session: session)
-        if selectedItem?.id == item.id {
-            selectedItem = nil
+    private func deleteItems() {
+        let itemsToDelete = filteredItems.filter { selection.contains($0.id) }
+        for item in itemsToDelete {
+            try? FileManager.default.removeItem(at: item.url)
         }
+        try? vaultManager.refreshItems(session: session, at: currentFolderURL)
+        selection.removeAll()
     }
 }
 
@@ -253,11 +399,20 @@ struct FileGridView: View {
     
     var body: some View {
         VStack {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 64, height: 64)
-                .shadow(color: .black.opacity(0.1), radius: 2, y: 2)
+            if item.isDirectory {
+                Image(systemName: "folder.fill")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 64, height: 64)
+                    .foregroundStyle(Color.accentColor)
+                    .shadow(color: .black.opacity(0.1), radius: 2, y: 2)
+            } else {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 64, height: 64)
+                    .shadow(color: .black.opacity(0.1), radius: 2, y: 2)
+            }
             
             Text(item.name)
                 .font(.caption)
