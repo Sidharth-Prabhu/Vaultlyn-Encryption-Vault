@@ -5,12 +5,17 @@ import SwiftData
 struct VaultlynApp: App {
     @State private var showingAbout = false
     @State private var vaultManager = VaultManager.shared
+    @State private var importManager = ImportManager.shared
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .sheet(isPresented: $showingAbout) {
                     AboutView()
+                }
+                .onOpenURL { url in
+                    importManager.handleExternalFiles([url])
                 }
         }
         .modelContainer(for: Vault.self)
@@ -68,5 +73,14 @@ struct VaultlynApp: App {
             }
         }
         .windowStyle(.hiddenTitleBar)
+    }
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        let urls = filenames.map { URL(fileURLWithPath: $0) }
+        Task { @MainActor in
+            ImportManager.shared.handleExternalFiles(urls)
+        }
     }
 }

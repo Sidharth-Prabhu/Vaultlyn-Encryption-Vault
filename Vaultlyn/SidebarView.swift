@@ -12,6 +12,10 @@ struct SidebarView: View {
     @State private var newVaultName = ""
     @State private var newVaultPassword = ""
     @State private var selectedFolderURL: URL?
+    @State private var selectedEmoji = "🔒"
+    
+    // Emojis for selection
+    let emojiOptions = ["🔒", "💼", "🏠", "📑", "🔑", "🛡️", "📦", "📁"]
     
     // Decoy state during creation
     @State private var useDecoy = false
@@ -32,6 +36,7 @@ struct SidebarView: View {
     @State private var showingEditVault = false
     @State private var vaultToEdit: Vault?
     @State private var editedVaultName = ""
+    @State private var editedVaultEmoji = "🔒"
     
     @State private var showingDeleteAlert = false
     @State private var vaultToDelete: Vault?
@@ -55,6 +60,7 @@ struct SidebarView: View {
         let decoyVerif: Data?
         // Stealth
         let hasStealth: Bool
+        let emoji: String
     }
     
     var body: some View {
@@ -65,6 +71,7 @@ struct SidebarView: View {
                         VaultRow(vault: vault, vaultManager: vaultManager, onEdit: {
                             vaultToEdit = vault
                             editedVaultName = vault.name
+                            editedVaultEmoji = vault.emoji
                             showingEditVault = true
                         }, onChangePassword: {
                             vaultToChangePassword = vault
@@ -133,8 +140,26 @@ struct SidebarView: View {
                         Text("Basic Info")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        TextField("Vault Name", text: $newVaultName)
-                            .textFieldStyle(.roundedBorder)
+                        
+                        HStack(spacing: 12) {
+                            TextField("", text: $selectedEmoji)
+                                .font(.title2)
+                                .frame(width: 44, height: 44)
+                                .multilineTextAlignment(.center)
+                                .background(Color.secondary.opacity(0.1))
+                                .cornerRadius(8)
+                                .textFieldStyle(.plain)
+                                .onChange(of: selectedEmoji) { _, newValue in
+                                    if newValue.count > 1 {
+                                        selectedEmoji = String(newValue.prefix(1))
+                                    }
+                                }
+                                .help("Click and press Cmd+Ctrl+Space for full emoji picker")
+                            
+                            TextField("Vault Name", text: $newVaultName)
+                                .textFieldStyle(.roundedBorder)
+                                .controlSize(.large)
+                        }
                         
                         SecureField("Master Password", text: $newVaultPassword)
                             .textFieldStyle(.roundedBorder)
@@ -200,7 +225,7 @@ struct SidebarView: View {
             }
             .padding()
         }
-        .frame(width: 450, height: 550)
+        .frame(width: 450, height: 600)
     }
     
     var recoveryKeyWarningSheet: some View {
@@ -290,11 +315,29 @@ struct SidebarView: View {
                 .font(.headline)
             
             VStack(alignment: .leading, spacing: 12) {
-                Text("Vault Name")
+                Text("Icon & Name")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                TextField("Name", text: $editedVaultName)
-                    .textFieldStyle(.roundedBorder)
+                
+                HStack(spacing: 12) {
+                    TextField("", text: $editedVaultEmoji)
+                        .font(.title2)
+                        .frame(width: 44, height: 44)
+                        .multilineTextAlignment(.center)
+                        .background(Color.secondary.opacity(0.1))
+                        .cornerRadius(8)
+                        .textFieldStyle(.plain)
+                        .onChange(of: editedVaultEmoji) { _, newValue in
+                            if newValue.count > 1 {
+                                editedVaultEmoji = String(newValue.prefix(1))
+                            }
+                        }
+                        .help("Click and press Cmd+Ctrl+Space for full emoji picker")
+                    
+                    TextField("Name", text: $editedVaultName)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.large)
+                }
             }
             .padding(.horizontal)
             
@@ -303,9 +346,10 @@ struct SidebarView: View {
                     showingEditVault = false
                 }
                 
-                Button("Save") {
+                Button("Save Changes") {
                     if let vault = vaultToEdit {
                         vault.name = editedVaultName
+                        vault.emoji = editedVaultEmoji
                         showingEditVault = false
                     }
                 }
@@ -364,7 +408,8 @@ struct SidebarView: View {
                 decoyPassword: useDecoy ? decoyPassword : nil,
                 decoySalt: dSalt,
                 decoyVerif: dVerif,
-                hasStealth: useStealth
+                hasStealth: useStealth,
+                emoji: selectedEmoji
             )
             
             showingAddVault = false
@@ -397,7 +442,8 @@ struct SidebarView: View {
                     hasDecoy: data.hasDecoy,
                     decoySalt: data.decoySalt,
                     decoyVerificationData: data.decoyVerif,
-                    hasStealth: data.hasStealth
+                    hasStealth: data.hasStealth,
+                    emoji: data.emoji
                 )
                 
                 modelContext.insert(newVault)
@@ -448,6 +494,7 @@ struct SidebarView: View {
         useStealth = false
         selectedFolderURL = nil
         pendingVaultData = nil
+        selectedEmoji = "🔒"
     }
     
     private func deleteVault(_ vault: Vault) {
@@ -472,22 +519,38 @@ struct VaultRow: View {
     
     var body: some View {
         NavigationLink(value: vault) {
-            HStack {
-                Label(vault.name, systemImage: isUnlocked ? "lock.open.fill" : "lock.fill")
+            HStack(spacing: 8) {
+                // Emoji Icon on the left
+                Text(vault.emoji)
+                    .font(.title3)
+                    .frame(width: 24, height: 24)
+                
+                Text(vault.name)
+                    .font(.body)
+                
                 Spacer()
-                if isUnlocked {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 8, height: 8)
-                        .shadow(color: .green.opacity(0.5), radius: 2)
-                }
-                if vault.isLockedOut {
-                    Image(systemName: "exclamationmark.shield.fill")
-                        .foregroundStyle(Color.red)
+                
+                // Status Icons on the right
+                HStack(spacing: 6) {
+                    if vault.isLockedOut {
+                        Image(systemName: "exclamationmark.shield.fill")
+                            .foregroundStyle(Color.red)
+                            .font(.caption)
+                    }
+                    
+                    Image(systemName: isUnlocked ? "lock.open.fill" : "lock.fill")
                         .font(.caption)
+                        .foregroundStyle(isUnlocked ? Color.green : Color.secondary)
+                    
+                    if isUnlocked {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                            .shadow(color: .green.opacity(0.5), radius: 2)
+                    }
                 }
             }
-            .foregroundStyle(isUnlocked ? Color.primary : (vault.isLockedOut ? Color.red : Color.secondary))
+            .padding(.vertical, 2)
         }
         .contextMenu {
             Button(action: onEdit) {

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AboutView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) var colorScheme
     
     var body: some View {
         VStack(spacing: 24) {
@@ -44,11 +45,18 @@ struct AboutView: View {
                 .controlSize(.large)
                 .padding(.horizontal, 32)
                 
-                VStack(spacing: 4) {
-                    Text("Developed by Sidharth P L")
-                        .font(.headline)
+                VStack(spacing: 8) {
+                    Text("From")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     
-                    Link("Contact Developer", destination: URL(string: "mailto:contact@sidharthpl.com")!)
+                    Image(colorScheme == .dark ? "FrisscoWhite" : "FrisscoBlack")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(height: 24)
+                        .shadow(color: .black.opacity(colorScheme == .dark ? 0.3 : 0.1), radius: 1)
+                    
+                    Link("Contact Support", destination: URL(string: "mailto:support@frissco.io")!)
                         .font(.subheadline)
                         .foregroundStyle(.blue)
                 }

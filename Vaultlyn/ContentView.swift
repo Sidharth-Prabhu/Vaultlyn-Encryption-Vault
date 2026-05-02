@@ -7,6 +7,8 @@ struct ContentView: View {
     @State private var selectedVault: Vault?
     @State private var isInitializing = true
     
+    @State private var importManager = ImportManager.shared
+    
     var body: some View {
         NavigationSplitView {
             SidebarView(selectedVault: $selectedVault)
@@ -29,6 +31,9 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 700, minHeight: 450)
+        .sheet(isPresented: $importManager.isShowingImportSheet) {
+            ImportView(files: importManager.pendingURLs)
+        }
         .onAppear {
             attemptAutoUnlock()
         }
