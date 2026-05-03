@@ -1,3 +1,10 @@
+//
+//  ContentView.swift
+//  Vaultlyn
+//
+//  Created by Sidharth Prabhu on 2026-05-02.
+//
+
 import SwiftUI
 import SwiftData
 

@@ -1,3 +1,10 @@
+//
+//  AboutView.swift
+//  Vaultlyn
+//
+//  Created by Sidharth Prabhu on 2026-05-02.
+//
+
 import SwiftUI
 
 struct AboutView: View {
